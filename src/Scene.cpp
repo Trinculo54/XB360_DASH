@@ -567,6 +567,27 @@ void Scene::DrawCommands(QuadRenderer& renderer, const std::vector<ManifestComma
                 live = TextVars()[cmd.text.substr(1, cmd.text.size() - 2)];
                 text = &live;
             }
+            if (cmd.caretVar >= 0)
+            {
+                // An edit box ("CARET"): one line, cut off at the box's sides,
+                // with a caret bar where the state variable says (a byte
+                // offset; past the end is the end), and the line moved along
+                // so that the caret is never out of the box.
+                const float kCaretWidth = 3.0f;
+                const FontAtlas& font = FontFor(cmd);
+                const size_t at = (std::min)(text->size(),
+                    static_cast<size_t>((std::max)(m_varValues[cmd.caretVar], 0)));
+                const float before = font.MeasureWidth(text->substr(0, at), cmd.pointSize);
+                const float shift = std::max(0.0f, before + kCaretWidth - w);
+                renderer.SetClip(x, y, w, h);
+                renderer.DrawTextAligned(font, *text, x - shift, y, w + shift + 4096.0f, h, 0, cmd.vAlign,
+                    cmd.pointSize, a, cmd.color.r, cmd.color.g, cmd.color.b, false);
+                renderer.DrawRect(x + before - shift, y + 1.0f, kCaretWidth, h - 2.0f,
+                    (cmd.color.a > 0.0f) ? a * cmd.caretColor.a / cmd.color.a : a,
+                    cmd.caretColor.r, cmd.caretColor.g, cmd.caretColor.b);
+                renderer.ClearClip();
+                break;
+            }
             renderer.DrawTextAligned(FontFor(cmd), *text,
                 x, y, w, h, cmd.hAlign, cmd.vAlign, cmd.pointSize,
                 a, cmd.color.r, cmd.color.g, cmd.color.b, cmd.quarterTurn);

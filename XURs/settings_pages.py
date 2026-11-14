@@ -64,8 +64,8 @@ from settings_build import (CANVAS, FOCUS_BLEND_SECONDS, HEADER_COLOR, HEADER_PO
                             PANEL_W, ROW_H, ROW_ICON, ROW_ICON_FOCUS, ROW_ICON_REST, ROW_POINT_SIZE,
                             ROW_TEXT_FOCUS, ROW_TEXT_REST, ROW_TEXT_W, ROW_TEXT_X, RULE_COLOR,
                             SCENE_ORIGIN, SHADER_REL, SHADER_STOPS, Builder)
-from xur_cook import (BACKDROP_STOPS, HALIGN_CENTER, HALIGN_LEFT, LEGEND_GLYPH_IMAGE, LEGEND_GLYPH_LETTER_COLOR,
-                      LEGEND_GLYPH_OFFSET, LEGEND_GLYPH_POINT_SIZE, LEGEND_GLYPH_SIZE, LEGEND_LABEL_COLOR,
+from xur_cook import (BACKDROP_STOPS, HALIGN_CENTER, HALIGN_LEFT, LEGEND_GLYPH_IMAGE, LEGEND_LABEL_SHADOW,
+                      LEGEND_GLYPH_OFFSET, LEGEND_GLYPH_SIZE, LEGEND_LABEL_COLOR,
                       LEGEND_LABEL_OFFSET, LEGEND_LABEL_POINT_SIZE, LEGEND_Y, POINT_SIZE_TO_PIXELS, VALIGN_CENTER,
                       VALIGN_TOP, Cooker, anchor_rect, build_image_index, find_skin_files, load_visual_templates,
                       resolve_image_path)
@@ -121,6 +121,10 @@ TYPED = {
                                                     'Please enter an answer to your pass code question.',
                                                     'Pass Code Reset Answer Not Set', True),
 }
+# How many characters a field takes, where the network pack says ("The PPPoE
+# user name you entered is not valid. This name cannot be more than 63
+# characters long." and its like). The app's own limit holds for the rest.
+TYPED_MAX = {'pppoeuser': 63, 'pppoepassword': 63, 'pppoeservice': 39, 'hostname': 39}
 # ...and the row that takes a pass code, which is xam's as well (guide_build.py: passcode).
 PRESSES = {'btnPasscode': 'GUIDE:GuidePasscode'}
 
@@ -133,6 +137,8 @@ def typed(b, scene, item, key):
     b.emit('SAY', f'{scene}/{item}.type', field)
     b.emit('SAY', f'{field}.title', title)
     b.emit('SAY', f'{field}.prompt', prompt)
+    if field in TYPED_MAX:
+        b.emit('SAY', f'{field}.max', TYPED_MAX[field])
     if first:
         b.emit('SAY', field, first)
     if unset:
@@ -573,8 +579,8 @@ def build(name, page, pages, image_index, font_path, cooker, panel):
         glyph = LEGEND_GLYPH_IMAGE.get(button.upper())
         if glyph:
             b.image(glyph, x + LEGEND_GLYPH_OFFSET, LEGEND_Y, LEGEND_GLYPH_SIZE, LEGEND_GLYPH_SIZE)
-        b.text(button.upper(), x + LEGEND_GLYPH_OFFSET, LEGEND_Y, LEGEND_GLYPH_SIZE, LEGEND_GLYPH_SIZE,
-               LEGEND_GLYPH_POINT_SIZE, LEGEND_GLYPH_LETTER_COLOR, HALIGN_CENTER, VALIGN_CENTER)
+        b.text(label, x + LEGEND_LABEL_OFFSET + 1.0, LEGEND_Y + 1.0, 512.0, LEGEND_GLYPH_SIZE,
+               LEGEND_LABEL_POINT_SIZE, LEGEND_LABEL_SHADOW, HALIGN_LEFT, VALIGN_CENTER)
         b.text(label, x + LEGEND_LABEL_OFFSET, LEGEND_Y, 512.0, LEGEND_GLYPH_SIZE,
                LEGEND_LABEL_POINT_SIZE, LEGEND_LABEL_COLOR, HALIGN_LEFT, VALIGN_CENTER)
         x += LEGEND_LABEL_OFFSET + b.measure(label, LEGEND_LABEL_POINT_SIZE) + 22.0

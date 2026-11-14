@@ -265,6 +265,17 @@ python3 hub_build.py --search-dir ..\DASH\dash_bin_embedded_assets --search-dir 
 python3 nav_check.py ..\assets\scenes --start Hub
 ```
 
+The legend's buttons are `LegendScene.xur`'s own pictures (`Legend_A.png`,
+`Legend_B.png`, `Legend_X.png`, `Legend_Y.png` in the shell pack,
+`archive_05`): a disc with its letter drawn in, heavy, with its own shadow.
+They were once the settings skin's plain discs with a letter typed over them
+in the app's font, which beside a capture of the console read as a different
+face a size too big. The caption has its drop shadow too (the layout's style
+0x1111; one pixel right and down, half black, as measured for the page
+names). The guide's legend is xam's and is a letter over a disc by design;
+its letter is bold there (TextStyle bit 2, which only button letters carry),
+struck twice three quarters of a pixel apart, the face having one weight.
+
 Tile icons are real files out of the extracted archives, resolved by basename
 the same way `xur_cook.py` resolves `common://` references -- `ico_64x_games`,
 `ico_64x_SettingsPreferences`, `ico_64x_TurnOff` and so on all exist in the
@@ -402,8 +413,10 @@ says nothing of what does, so the page around it is judgment: the
 dashboard's "Create Pass Code" and its prompt where the keyboard has its
 title and prompt, the block centred under them, and after four buttons
 "Verify Pass Code" / "Please enter your pass code again." for four more.
-On a controller the code is entered with the buttons themselves; here A on a
-cell enters it. The two codes are not compared and nothing is stored.
+A cell is pressed by the button drawn in it and by nothing else, as on the
+console: the triggers, the bumpers, the d-pad's four directions, X and Y. So
+no cell has focus, the d-pad doesn't move about, and A does nothing. The two
+codes are not compared and nothing is stored.
 
 What opens them (`settings_pages.py`: `TYPED`, `PRESSES`): Console Name's
 "Custom..." ("Console Name" / "Enter a name for this console."), PPPoE's
@@ -439,34 +452,81 @@ The controller is read whichever window is in front, so its buttons count
 only while this app's window is (`main.cpp`); the keyboard needs no such
 test.
 
-Not built: the caret and the two cursor buttons, X and Y as shortcuts for
-Backspace and Space (the legend shows them), the other languages' character
-sets, a length limit per field (there is one for all), and the number pads
-the network pages use for addresses. `nav_check.py` treats a typed row as
+The keyboard was checked against a photo of the console's. Every key and
+button has its one-unit outline (the visual's `Edge`, a nine-grid the cooker
+doesn't draw, so `guide_build.py` draws it); Backspace and Space are each as
+wide as five keys, as in the photo (the layout has them narrower and its
+code sizes them); only "A Select / B Back" is under it. The edit box is a
+real one: a caret (the skin's `XuiCaret`, a green bar), which Left and Right
+move, text typed or deleted where the caret is, and a line longer than the
+box moved along to keep the caret in view. A field takes as many characters
+as `SAY <field>.max` says -- 63, 63 and 39 for the PPPoE fields and 39 for
+the host name are the network pack's own error strings, 15 for a profile's
+name is judgment -- and 48 otherwise.
+
+The buttons drawn on the keyboard press its keys from anywhere, by the
+layout's own pictures: X Backspace, Y Space, LB and RB the cursor, LT
+Symbols, RT Accents, the left stick's click Caps, Start Done. In a manifest
+that is `SHORTCUT <button> <item>` (the pass code's cells are the same
+thing), and a `CARET <state> a r g b` line after a TEXT makes it the edit
+box. On a PC keyboard the pad's buttons are: arrows or WASD the d-pad, Enter
+A, Backspace B, X and Y themselves, Q and E the bumpers, Z and C the
+triggers, F the left stick's click, Tab Start, G the guide.
+
+Not built: the caret's blink, the other languages' character sets, and the
+number pads the network pages use for addresses. `nav_check.py` treats a typed row as
 opening `GuideKeyboard`.
 
 ## The libraries
 
 `XURs\library_build.py` cooks what the hub's Recent, My Games and My Apps
 tiles open (`contentlibrary:`, `gameslibrary:` and `applibrary:` in
-`dashhome-offline.xml`), as they are on a console with nothing in them. A
-library is a dashboard app of its own -- a hub like the main one, its name
-where the page names are, a channel of tiles under it that its code fills --
-and with nothing to fill it with the channel is `emptychannel.xur`: a pale box
-the size of a channel with one line of text in it. That layout is cooked as
-it stands under the hub's own furniture. The names ("recent", "my games", "my
-apps") and the text ("Your recently played and downloaded items appear
-here."; "No games found. Download them from the Games Store.", put together
-from the pack's own "No {1} found. Download them from the {2}.", "games" and
-"Games Store") are the library pack's strings. A channel's place on screen is
-the hub's: `hubchannellayout.xur`, the social page, is the same 865 wide, and
-its column of tiles at x = 0 is at 207.
+`dashhome-offline.xml`). A library is a dashboard app of its own, and what it
+looks like is taken from two captures of the console (My Games and My Apps):
+its name at the top right with "17 of 26" under it, where the hub has the
+gamertag, and what it holds from the screen's left edge. The layouts and
+every word are the rip's -- the library pack's names ("recent", "my games",
+"my apps"), the marketplace pack's "{1} of {2}" and "Launch" -- and the
+places are the captures': tiles and cards on a grid from x = 96 and y = 178
+(the hub's own block), the title ending at the safe area's right edge,
+x = 1184.
 
-Judgment: that an empty library shows only this -- one with things in it also
-has "show me" and "sort" tiles, and whether they stay when there is nothing
-to show isn't known; which sentence each library uses; and that its name
-stands alone (the stores beside it are Xbox Live's). The guide's My Games
-row opens the same page.
+**My Apps** is a grid: two rows of `SmallLibrarySlot_Hub.xur` tiles, 197
+square at a pitch of 201, filled down each column then across
+(`DoubleTallBrowseTemplate.xur`), over "A Launch / B Back / X App Details".
+A tile is a plate with either art fitted to it whole or an icon 64 square
+and the name along the bottom; the focused one stands 1.077 times larger,
+the hub's own focus. It holds the apps a console has without downloading
+any, by the pack's names and in name order: Media Center (its app tile,
+`AppTile_MCE.jpg`), Picture Viewer, System Music Player and System Video
+Player. Which four, and which icon is whose, is by the capture and the
+files' names.
+
+**My Games** is a row of cards: "show me / all games" and "sort / titles" at
+the top left (`btn_Filter`, 250x64, with its small down arrow), and the
+cards across the middle -- `MarketplaceSlot.xur`, 204x398: a white plate,
+the box art fitted to 184x280, the title under it and a small controller at
+the bottom right -- over "A Launch / B Back". The My Games capture is of an
+earlier dashboard, whose card is a little wider and shorter than this one's
+and whose title is capitalised, so the cards' gap (4) is judgment, as are
+the focused card standing 3% larger and there being no details line for a
+game never played.
+
+**A test game.** `GAMES` in the script is what is installed, and it holds
+one made-up entry, "Test Game", to see the game libraries with something in
+them. Its box art is a stand-in the script draws (a dark card with the
+title on it), nothing of any real game's. My Games shows it as a card and
+Recent as a tile; that Recent is a grid like My Apps, and lists a game just
+installed, is judgment -- there is no capture of it. With `GAMES` empty
+those two show the pack's sentence instead ("No games found. Download them
+from the Games Store.", "Your recently played and downloaded items appear
+here.") in `emptychannel.xur`'s box.
+
+Not built: A on anything (Launch), App Details, the filter headers as focus
+stops and their pages (`FilterChannelLayout.xur`), a game's details
+(`GameOverviewChannelLayout.xur`), and scrolling -- a row or grid wider than
+the screen runs off its right edge. The guide's My Games row opens the same
+page.
 
 ```
 cd XURs

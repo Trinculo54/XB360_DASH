@@ -98,6 +98,7 @@ TEXTSTYLE_RIGHT = 0x0200
 TEXTSTYLE_HCENTER = 0x0400
 TEXTSTYLE_VCENTER = 0x1000
 TEXTSTYLE_DROPSHADOW = 0x0001   # see Cooker.cook_text for how this was pinned
+TEXTSTYLE_BOLD = 0x0004         # ...and this
 TEXTSTYLE_VBOTTOM = 0x2000  # not observed in these assets; handled for completeness
 
 HALIGN_LEFT, HALIGN_CENTER, HALIGN_RIGHT = 0, 1, 2
@@ -196,13 +197,20 @@ LEGEND_GLYPH_OFFSET = -6.0
 LEGEND_LABEL_OFFSET = 30.0
 LEGEND_LABEL_POINT_SIZE = 14.0
 LEGEND_LABEL_COLOR = {'a': 255, 'r': 255, 'g': 255, 'b': 255}
-LEGEND_GLYPH_POINT_SIZE = 14.0
-LEGEND_GLYPH_LETTER_COLOR = {'a': 255, 'r': 245, 'g': 245, 'b': 245}
+# The caption's drop shadow: LegendScene's Text is style 0x1111, whose bit 0
+# is the shadow (see Cooker.cook_text, where both halves were measured: one
+# 720p pixel right and down, the authored 50% black).
+LEGEND_LABEL_SHADOW = {'a': 127, 'r': 15, 'g': 15, 'b': 15}
+# LegendScene.xur's own pictures (the shell pack, archive_05): a disc with its
+# letter drawn in, heavy and with a shadow of its own. Not the plain discs of
+# the settings skin's legend_A (A-Button_32.png, a letter typed over it),
+# which is what was cooked before -- in the app's font, a size too large and
+# a weight too light beside a capture of the console.
 LEGEND_GLYPH_IMAGE = {
-    'A': 'A-Button_32.png',
-    'B': 'B-Button_32.png',
-    'X': 'X-Button_32.png',
-    'Y': 'Y-Button_32.png',
+    'A': 'Legend_A.png',
+    'B': 'Legend_B.png',
+    'X': 'Legend_X.png',
+    'Y': 'Legend_Y.png',
 }
 
 
@@ -608,6 +616,7 @@ class Cooker:
         # Canvas units per 720p pixel, to draw text drop shadows; None = don't.
         # See cook_text.
         self.shadow_offset = None
+        self.bold_offset = None
 
     def emit(self, *fields):
         self.lines.append(' '.join(_fmt(f) for f in fields))
@@ -760,6 +769,15 @@ class Cooker:
         self.lines.append(
             f'TEXT {_fmt(x)} {_fmt(y)} {_fmt(w)} {_fmt(h)} {halign} {valign} {_fmt(point_size)} '
             f'{_apply_opacity(c["a"], opacity)} {c["r"]} {c["g"]} {c["b"]} {text}')
+        # Bold: TextStyle bit 2. The letter on a legend's button carries it in
+        # both skins (0x15, 0x1415) where its caption doesn't, and the shell's
+        # own Legend_A.png has that letter drawn heavy. The face has one
+        # weight, so the run is struck twice, bold_offset apart. Opt-in, as
+        # the shadow is.
+        if self.bold_offset and (props.get('TextStyle', 0) or 0) & TEXTSTYLE_BOLD:
+            self.lines.append(
+                f'TEXT {_fmt(x + self.bold_offset)} {_fmt(y)} {_fmt(w)} {_fmt(h)} {halign} {valign} '
+                f'{_fmt(point_size)} {_apply_opacity(c["a"], opacity)} {c["r"]} {c["g"]} {c["b"]} {text}')
 
     def _place_text(self, text, props, x, y, w, h, opacity, sibling_text_slots,
                     point_size=None, color=None):
@@ -1010,17 +1028,14 @@ class Cooker:
             self.used_images[resolved] = os.path.basename(resolved)
             self.emit('IMAGE', x + LEGEND_GLYPH_OFFSET, self.legend_y, LEGEND_GLYPH_SIZE, LEGEND_GLYPH_SIZE,
                       os.path.basename(resolved), 255, 255, 255, 255)
-        # The 32px button PNGs are plain coloured discs -- the letter is a
-        # separate text element on top, exactly as skin.xur's legend_A/legend_B
-        # visuals do it (an XuiText 'A'/'B' in (245,245,245) over the figure).
-        lc = LEGEND_GLYPH_LETTER_COLOR
-        self.lines.append(
-            f'TEXT {_fmt(x + LEGEND_GLYPH_OFFSET)} {_fmt(self.legend_y)} '
-            f'{_fmt(LEGEND_GLYPH_SIZE)} {_fmt(LEGEND_GLYPH_SIZE)} '
-            f'{HALIGN_CENTER} {VALIGN_CENTER} '
-            f'{_fmt(LEGEND_GLYPH_POINT_SIZE * POINT_SIZE_TO_PIXELS)} '
-            f'{lc["a"]} {lc["r"]} {lc["g"]} {lc["b"]} {button.upper()}')
         if label:
+            for c, off in ((LEGEND_LABEL_SHADOW, 1.0),):
+                self.lines.append(
+                    f'TEXT {_fmt(x + LEGEND_LABEL_OFFSET + off)} {_fmt(self.legend_y + off)} '
+                    f'{_fmt(512.0)} {_fmt(LEGEND_GLYPH_SIZE)} '
+                    f'{HALIGN_LEFT} {VALIGN_CENTER} '
+                    f'{_fmt(LEGEND_LABEL_POINT_SIZE * POINT_SIZE_TO_PIXELS)} '
+                    f'{c["a"]} {c["r"]} {c["g"]} {c["b"]} {label}')
             c = LEGEND_LABEL_COLOR
             self.lines.append(
                 f'TEXT {_fmt(x + LEGEND_LABEL_OFFSET)} {_fmt(self.legend_y)} '

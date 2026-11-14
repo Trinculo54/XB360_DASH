@@ -246,7 +246,22 @@ void Guide::Move(Navigator::Direction direction)
     }
 }
 
-void Guide::Activate()
+bool Guide::Shortcut(const std::string& button)
+{
+    if (!m_open || m_stage != Stage::None)
+    {
+        return false;
+    }
+    const std::string item = m_nav.ShortcutItem(button);
+    if (item.empty())
+    {
+        return false;
+    }
+    Activate(item);
+    return true;
+}
+
+void Guide::Activate(const std::string& item)
 {
     if (!m_open || m_stage != Stage::None)
     {
@@ -254,8 +269,8 @@ void Guide::Activate()
     }
     // Read before Activate, which only knows GOTO: DASH is the guide's own
     // verb, for a row that leaves the guide for a dashboard scene.
-    const std::string action = m_nav.FocusedAction();
-    m_nav.Activate();
+    const std::string action = m_nav.FocusedAction(item);
+    m_nav.Activate(item);
     if (action.rfind("DASH:", 0) == 0)
     {
         m_pendingDash = action.substr(5);

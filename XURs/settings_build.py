@@ -63,7 +63,7 @@ except ImportError:
     ImageFont = None
 
 from xur_cook import (BACKDROP_STOPS, LEGEND_GLYPH_IMAGE, LEGEND_GLYPH_OFFSET, LEGEND_GLYPH_SIZE,
-                      LEGEND_GLYPH_LETTER_COLOR, LEGEND_GLYPH_POINT_SIZE, LEGEND_LABEL_COLOR,
+                      LEGEND_LABEL_COLOR, LEGEND_LABEL_SHADOW,
                       LEGEND_LABEL_OFFSET, LEGEND_LABEL_POINT_SIZE, LEGEND_Y, POINT_SIZE_TO_PIXELS,
                       HALIGN_LEFT, HALIGN_CENTER, VALIGN_CENTER, VALIGN_TOP,
                       build_image_index, resolve_image_path, _fmt)
@@ -282,8 +282,8 @@ def build(rows, image_index, font_path):
         glyph = LEGEND_GLYPH_IMAGE.get(button.upper())
         if glyph:
             b.image(glyph, x + LEGEND_GLYPH_OFFSET, LEGEND_Y, LEGEND_GLYPH_SIZE, LEGEND_GLYPH_SIZE)
-        b.text(button.upper(), x + LEGEND_GLYPH_OFFSET, LEGEND_Y, LEGEND_GLYPH_SIZE, LEGEND_GLYPH_SIZE,
-               LEGEND_GLYPH_POINT_SIZE, LEGEND_GLYPH_LETTER_COLOR, HALIGN_CENTER, VALIGN_CENTER)
+        b.text(label, x + LEGEND_LABEL_OFFSET + 1.0, LEGEND_Y + 1.0, 512.0, LEGEND_GLYPH_SIZE,
+               LEGEND_LABEL_POINT_SIZE, LEGEND_LABEL_SHADOW, HALIGN_LEFT, VALIGN_CENTER)
         b.text(label, x + LEGEND_LABEL_OFFSET, LEGEND_Y, 512.0, LEGEND_GLYPH_SIZE,
                LEGEND_LABEL_POINT_SIZE, LEGEND_LABEL_COLOR, HALIGN_LEFT, VALIGN_CENTER)
         x += LEGEND_LABEL_OFFSET + b.measure(label, LEGEND_LABEL_POINT_SIZE) + 22.0

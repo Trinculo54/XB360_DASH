@@ -795,6 +795,7 @@ class Scene:
         self.ctx = ctx
         self.c = Cooker(ctx['index'], visual_templates=ctx['templates'])
         self.c.shadow_offset = SHADOW_OFFSET
+        self.c.bold_offset = 0.75 * SHADOW_OFFSET       # three quarters of a 720p pixel: see Cooker.cook_text
         self.c.cook_text = wrapping(self.c.cook_text, ctx['font'])
         self.c.comment(f'{name} -- {comment} See guide_build.py.')
         # GuideMain is authored 852x480, a hair narrower than 16:9. Widened to
@@ -1149,6 +1150,17 @@ def cook_tab(n, ctx, scenes=TAB_SCENES, content=TAB_CONTENT):
     emit_items(s, parent, rows, entries, tab_left, tab_right)
 
 
+def edge(c, row, x, y):
+    """A control's Edge, which the cooker (it has no nine-grids) leaves out: edge.png with no centre and
+    one-unit offsets, which is a one-unit outline in the grid's ColorFactor. Every key of the keyboard."""
+    p = props_of(row)
+    tint = props_of(c.visual_templates[p['Visual'].split(':')[0].split('@')[0]]['children'][0])['ColorFactor']
+    px, py, w, h = x + p['Position'][0], y + p['Position'][1], p['Width'], p['Height']
+    for rx, ry, rw, rh in ((px, py, w, 1.0), (px, py + h - 1.0, w, 1.0),
+                           (px, py + 1.0, 1.0, h - 2.0), (px + w - 1.0, py + 1.0, 1.0, h - 2.0)):
+        c.emit('RECT', rx, ry, rw, rh, 0, tint['a'], tint['r'], tint['g'], tint['b'])
+
+
 def emit_items(s, parent, rows, entries, left, right, actions=None):
     """The ITEM blocks for a scene's rows. `left` / `right` are where those
     directions go from a row with no link of its own; `actions` are this
@@ -1223,6 +1235,8 @@ def emit_items(s, parent, rows, entries, left, right, actions=None):
                     slider_visual(s.ctx, row)
                 if row.get('choices'):
                     override(row, {'Text': row['choices'][value]})
+                if row.get('edge'):
+                    edge(c, row, x, y)
                 visual = props_of(row)['Visual'].split(':')[0]
                 check = 'Check' if value == 1 and row['class'] in ('XuiCheckbox', 'XuiRadioButton') else ''
                 # EndPress, not Press: Press is the frame the flash STARTS on,
@@ -1230,6 +1244,8 @@ def emit_items(s, parent, rows, entries, left, right, actions=None):
                 # its own (a slider, a ticked box) just stays focused.
                 frame = {'normal': 'Normal' + check, 'focus': 'Focus' + check,
                          'press': 'EndPress' if 'EndPress' in frames and not check else 'Focus' + check}[state]
+                if row.get('unfocused') and state == 'focus':
+                    frame = 'Normal'            # pressed by its button, never focused: a pass code's cells
                 c.state_overrides[rid] = frame
                 # A control whose state lives in a nested timeline has a
                 # template variant per state instead (see slider_visual).
@@ -1300,13 +1316,23 @@ KEYBOARD = ['1234567890' 'qwertyuiop' 'asdfghjkl-' 'zxcvbnm_@.',
             '1234567890' ',;:\'"!?¡¿%' '[]{}`$£«»#' '<>()€¥¤~^\\' '|=*/+-@_&.',
             '1234567890' 'àáâãäåñèéê' 'ëþçýìíîïùú' 'ûòóôõðø×œæ' 'ßÿºª.üµš_ö']
 # The buttons either side, top to bottom, and what each is beside: (id, the
-# pack's caption, action, [ACTIONIF kbmode value action ...]). The cursor
-# keys do nothing: there is no caret.
+# pack's caption, action, [ACTIONIF kbmode value action ...]).
+#
+# Each button, and Backspace and Space, wears the picture of the controller
+# button that presses it from anywhere (KEYBOARD_BUTTONS, by the layout's own
+# ImagePath): cooked as SHORTCUT lines. Every key and button has a one-unit
+# outline (edge). The edit box is a TEXT with a CARET: the skin's XuiCaret is
+# a bar 3 wide, (0, 138, 0) at 0.65, and where it stands is the app's
+# `kbcaret`, which Left and Right move. A photo of the console's keyboard (the
+# user's) shows only A Select / B Back under it, so the layout's own X and Y
+# legends are left off.
+KEYBOARD_BUTTONS = {'btn_x.png': 'X', 'btn_y.png': 'Y', 'lb.png': 'LB', 'rb.png': 'RB', 'lt.png': 'LT',
+                    'rt.png': 'RT', 'caps.png': 'LS', 'done.png': 'START'}
 KEYBOARD_SIDES = [
-    [('Key.Left', 'Left', '-', []),
+    [('Key.Left', 'Left', 'KEY:LEFT', []),
      ('Key.Prev', ['Symbols', 'Symbols', 'Alphabet', 'Symbols', 'Symbols'], 'SET:kbmode=2', [(2, 'SET:kbmode=0')]),
      ('Key.Caps', 'Caps', 'SET:kbmode=1', [(1, 'SET:kbmode=0'), (2, '-'), (3, 'SET:kbmode=4'), (4, 'SET:kbmode=3')])],
-    [('Key.Right', 'Right', '-', []),
+    [('Key.Right', 'Right', 'KEY:RIGHT', []),
      ('Key.Next', ['Accents', 'Accents', 'Accents', 'Alphabet', 'Alphabet'], 'SET:kbmode=3',
       [(3, 'SET:kbmode=0'), (4, 'SET:kbmode=0')]),
      ('Key.OK', 'Done', 'KEY:DONE', [])],
@@ -1320,7 +1346,10 @@ def capital(ch):
 
 
 def keyboard(ctx):
+    shortcuts = []
+
     def prepare(hud):
+        override(hud, {'LegendX': '', 'LegendY': ''})
         override(child(hud, 'Text_Header'), {'Text': '{kbtitle}'})
         base = parse(layout_path(ctx, 'KeyboardBase.xur'))['children'][0]
         holder = child(hud, 'KeyboardPlaceholder')
@@ -1338,6 +1367,11 @@ def keyboard(ctx):
             kid = props_of(key).get('Id') or ''
             if kid in ('Key.JComma', 'Key.JPeriod'):
                 override(key, {'Show': False})                      # the Japanese sets' own
+            if key['class'] == 'XuiButton':
+                key['edge'] = True
+                button = KEYBOARD_BUTTONS.get((props_of(key).get('ImagePath') or '').lower())
+                if button and props_of(key).get('Show', True):
+                    shortcuts.append((button, kid))
             if kid.count('_') != 1 or not kid[4:].replace('_', '').isdigit():
                 continue
             r, col = (int(n) for n in kid[4:].split('_'))
@@ -1362,10 +1396,27 @@ def keyboard(ctx):
                     key['modes'] = ('kbmode', caption)
                 key['lines'] = [f'ACTIONIF kbmode {m} {a}' for m, a in others]
                 actions[kid] = action
-        override(child(keys, 'Key.BS'), {'NavLeft': 'Key.Caps', 'NavRight': 'Key.Spc'})
-        override(child(keys, 'Key.Spc'), {'NavLeft': 'Key.BS', 'NavRight': 'Key.OK'})
+        # Backspace and Space: in the photo each is as wide as five keys, side by side under the ten (the
+        # layout has them 134 wide, and its code evidently sizes them).
+        first = props_of(child(keys, 'Key.0_0'))['Position'][0]
+        pitch = props_of(child(keys, 'Key.0_1'))['Position'][0] - first
+        wide = 5 * pitch - (pitch - props_of(child(keys, 'Key.0_0'))['Width'])
+        for kid, x, left, right in (('Key.BS', first, 'Key.Caps', 'Key.Spc'), ('Key.Spc', first + 5 * pitch, 'Key.BS', 'Key.OK')):
+            key = child(keys, kid)
+            _x, y, z = props_of(key)['Position']
+            override(key, {'Position': (x, y, z), 'Width': wide, 'NavLeft': left, 'NavRight': right})
         return actions
-    cook_page('KeyboardMain.xur', ctx, 'GuideKeyboard', prepare, lambda c: c.emit('ENTER', 'kbmode', 0))
+
+    def also(c):
+        c.emit('ENTER', 'kbmode', 0)
+        c.emit('ENTER', 'kbcaret', 9999)        # past the end is the end: it opens after what is there
+        for button, kid in shortcuts:
+            c.emit('SHORTCUT', button, kid)
+        caret = props_of(ctx['templates']['XuiCaret']['children'][0])
+        fill = {f['property']: f['value'] for f in caret['Fill']}['FillColor']
+        box = next(i for i, line in enumerate(c.lines) if line.endswith(' {typed}'))
+        c.lines.insert(box + 1, f"CARET kbcaret {int(round(255 * caret['Opacity']))} {fill['r']} {fill['g']} {fill['b']}")
+    cook_page('KeyboardMain.xur', ctx, 'GuideKeyboard', prepare, also)
 
 
 # Pass code entry (signin.xex's passcode.xur): four boxes that fill as a code
@@ -1378,6 +1429,14 @@ def keyboard(ctx):
 # How far in the code is, is the app's `passn`: 0-3 buttons of the code, 4-7
 # of the second time through. A cell counts one (SET:, an ACTIONIF per count)
 # and the eighth press leaves. The two codes are not compared.
+#
+# A cell is pressed by the button drawn in it and nothing else (SHORTCUT, by
+# the layout's own pictures: PASSCODE_BUTTONS) -- the triggers, the bumpers,
+# the d-pad's four directions, X and Y. So nothing has focus to show, the
+# d-pad does not move about, and A does nothing (a SHORTCUT to no item).
+PASSCODE_BUTTONS = {'lt_32x.png': 'LT', 'lb_32x.png': 'LB', 'rb_32x.png': 'RB', 'rt_32x.png': 'RT',
+                    'left_d.png': 'LEFT', 'up_d.png': 'UP', 'down_d.png': 'DOWN', 'right_d.png': 'RIGHT',
+                    'x-button_full.png': 'X', 'y-button_full.png': 'Y'}
 PASSCODE = [('Create Pass Code', 'Use X, Y, triggers, bumpers, and the D-pad to create your 4-button pass code.'),
             ('Verify Pass Code', 'Please enter your pass code again.')]
 PASSCODE_AT = (291.0, 140.0)                    # the block: 270 wide, centred on the 852
@@ -1389,7 +1448,7 @@ def passcode(ctx):
     kept = {}
 
     def prepare(hud):
-        override(hud, {'LegendA': 'Select', 'LegendB': 'Back'})
+        override(hud, {'LegendB': 'Back'})
         for kid in hud['children']:
             x, y, z = props_of(kid)['Position']
             override(kid, {'Position': (x + PASSCODE_AT[0], y + PASSCODE_AT[1], z)})
@@ -1411,6 +1470,9 @@ def passcode(ctx):
                             'NavUp': cell_id(1 - r, col), 'NavDown': cell_id(1 - r, col)})
             picture = child(scene, f'Img{i + 1}')       # the button that is this digit, drawn with its cell
             cell['with'] = [(copy.deepcopy(picture), gx, gy)]
+            cell['unfocused'] = True
+            kept.setdefault('shortcuts', []).append(
+                (PASSCODE_BUTTONS[props_of(picture)['ImagePath'].split('/')[-1].lower()], f'btn{digit}'))
             override(picture, {'Show': False})
             cell['lines'] = [f'ACTIONIF passn {n} SET:passn={n + 1}' for n in range(1, 7)] + ['ACTIONIF passn 7 BACK']
             actions[f'btn{digit}'] = 'SET:passn=1'
@@ -1419,6 +1481,9 @@ def passcode(ctx):
 
     def also(c):
         c.emit('ENTER', 'passn', 0)
+        for button, cell in kept['shortcuts']:
+            c.emit('SHORTCUT', button, cell)
+        c.emit('SHORTCUT', 'A', '-')
         for n in range(8):
             c.emit('IF', 'passn', n)
             for text, (x, y, w, h), visual in zip(PASSCODE[n // 4], (PASSCODE_TITLE, PASSCODE_PROMPT),
@@ -1464,6 +1529,7 @@ def save_profile(ctx):
 
     def also(c):
         c.emit('SAY', 'newprofile.title', 'Enter Profile Name')
+        c.emit('SAY', 'newprofile.max', 15)     # a gamertag's length: judgment
         c.emit('SAY', 'newprofile.then', 'GuideSaveProfile')
     cook_page('Congratulations.xur', ctx, 'GuideSaveProfile', prepare, also)
 

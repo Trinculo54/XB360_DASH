@@ -2,6 +2,7 @@
 #include "FileUtil.h"
 #include "TextVars.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 #include <windows.h>
@@ -975,7 +976,7 @@ bool Navigator::FollowShoulder(bool forward)
     return true;
 }
 
-bool Navigator::Activate()
+bool Navigator::Activate(const std::string& item)
 {
     if (IsAwaitingPress() || m_intro.active)
     {
@@ -989,7 +990,7 @@ bool Navigator::Activate()
     {
         return false;
     }
-    int index = scene->GetManifest().FindItem(GetFocusedItemId());
+    int index = scene->GetManifest().FindItem(item.empty() ? GetFocusedItemId() : item);
     if (index < 0)
     {
         return false;
@@ -1014,7 +1015,7 @@ bool Navigator::Activate()
     if (scene->GetManifest().GetPressInSeconds() > 0.0f
         || scene->GetManifest().GetPressOutSeconds() > 0.0f)
     {
-        m_press.item = GetFocusedItemId();
+        m_press.item = activated.id;
         m_press.scene = m_currentScene;
         m_press.t = 0.0f;
         m_press.active = true;
@@ -1060,28 +1061,53 @@ bool Navigator::Activate()
         // which "field" names (main.cpp, on a row that is typed).
         std::map<std::string, std::string>& text = TextVars();
         std::string& typed = text["typed"];
+        // Where the caret is: a byte offset into `typed` held as the state
+        // "kbcaret", which the edit box draws at. Past the end is the end --
+        // the keyboard opens with it there ("ENTER kbcaret 9999").
+        int& held = m_state["kbcaret"];
+        size_t caret = (std::min)(typed.size(), static_cast<size_t>((std::max)(held, 0)));
+        // One character back from `at`: in UTF-8, to the lead byte before it.
+        const auto back = [&typed](size_t at)
+        {
+            while (at > 0 && (static_cast<unsigned char>(typed[--at]) & 0xC0) == 0x80) {}
+            return at;
+        };
         const std::string key = action.substr(4);
         if (key == "DONE")
         {
             text[text["field"]] = typed;
         }
+        else if (key == "LEFT")
+        {
+            caret = back(caret);
+        }
+        else if (key == "RIGHT")
+        {
+            if (caret < typed.size())
+            {
+                ++caret;
+                while (caret < typed.size() && (static_cast<unsigned char>(typed[caret]) & 0xC0) == 0x80)
+                {
+                    ++caret;
+                }
+            }
+        }
         else if (key == "BACK")
         {
-            // One character: in UTF-8, a lead byte and what continues it.
-            while (!typed.empty() && (static_cast<unsigned char>(typed.back()) & 0xC0) == 0x80)
-            {
-                typed.pop_back();
-            }
-            if (!typed.empty())
-            {
-                typed.pop_back();
-            }
+            const size_t from = back(caret);
+            typed.erase(from, caret - from);
+            caret = from;
         }
-        // shortcut: one length limit (in bytes) for every field, where the console's is the field's own; give "TYPE:" a limit when a field needs one
-        else if (typed.size() < 48)
+        // As many characters as the field takes ("SAY <field>.max 39"), or 48
+        // where nothing says.
+        else if (std::count_if(typed.begin(), typed.end(), [](char c) { return (static_cast<unsigned char>(c) & 0xC0) != 0x80; })
+            < (std::max)(1, std::atoi(text.count(text["field"] + ".max") ? text[text["field"] + ".max"].c_str() : "48")))
         {
-            typed += (key == "SPACE") ? std::string(" ") : key;
+            const std::string add = (key == "SPACE") ? std::string(" ") : key;
+            typed.insert(caret, add);
+            caret += add.size();
         }
+        held = static_cast<int>(caret);
         return true;
     }
     if (action.rfind("GOTO:", 0) == 0)
@@ -1111,11 +1137,17 @@ std::string Navigator::ActionOf(const ManifestItem& item) const
     return item.action;
 }
 
-std::string Navigator::FocusedAction() const
+std::string Navigator::FocusedAction(const std::string& item) const
 {
     const Scene* scene = GetCurrentScene();
-    const int index = scene ? scene->GetManifest().FindItem(GetFocusedItemId()) : -1;
+    const int index = scene ? scene->GetManifest().FindItem(item.empty() ? GetFocusedItemId() : item) : -1;
     return (index >= 0) ? ActionOf(scene->GetManifest().GetItems()[index]) : std::string();
+}
+
+std::string Navigator::ShortcutItem(const std::string& button) const
+{
+    const Scene* scene = GetCurrentScene();
+    return scene ? scene->GetManifest().GetShortcut(button) : std::string();
 }
 
 bool Navigator::PerformGoto(const std::string& sceneName)

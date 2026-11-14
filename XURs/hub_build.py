@@ -86,7 +86,7 @@ def as_captured(image):
     return Image.merge('RGBA', (r.point(lut), g.point(lut), b.point(lut), a))
 
 from xur_cook import (BACKDROP_STOPS, LEGEND_GLYPH_IMAGE, LEGEND_GLYPH_OFFSET, LEGEND_GLYPH_SIZE,
-                      LEGEND_GLYPH_LETTER_COLOR, LEGEND_GLYPH_POINT_SIZE, LEGEND_LABEL_COLOR,
+                      LEGEND_LABEL_COLOR, LEGEND_LABEL_SHADOW,
                       LEGEND_LABEL_OFFSET, LEGEND_LABEL_POINT_SIZE, LEGEND_Y, POINT_SIZE_TO_PIXELS,
                       HALIGN_LEFT, HALIGN_CENTER, HALIGN_RIGHT, VALIGN_TOP, VALIGN_CENTER, VALIGN_BOTTOM,
                       build_image_index, resolve_image_path, _fmt)
@@ -914,8 +914,8 @@ class HubBuilder:
             image = LEGEND_GLYPH_IMAGE.get(button.upper())
             if image:
                 self.image(image, x + LEGEND_GLYPH_OFFSET, LEGEND_Y, LEGEND_GLYPH_SIZE, LEGEND_GLYPH_SIZE)
-            self.text(button.upper(), x + LEGEND_GLYPH_OFFSET, LEGEND_Y, LEGEND_GLYPH_SIZE, LEGEND_GLYPH_SIZE,
-                      LEGEND_GLYPH_POINT_SIZE, LEGEND_GLYPH_LETTER_COLOR, HALIGN_CENTER, VALIGN_CENTER)
+            self.text(label, x + LEGEND_LABEL_OFFSET + 1.0, LEGEND_Y + 1.0, 512.0, LEGEND_GLYPH_SIZE,
+                      LEGEND_LABEL_POINT_SIZE, LEGEND_LABEL_SHADOW, HALIGN_LEFT, VALIGN_CENTER)
             self.text(label, x + LEGEND_LABEL_OFFSET, LEGEND_Y, 512.0, LEGEND_GLYPH_SIZE,
                       LEGEND_LABEL_POINT_SIZE, LEGEND_LABEL_COLOR, HALIGN_LEFT, VALIGN_CENTER)
             # Advance past the caption. Measured on the captures: the A item

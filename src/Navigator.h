@@ -83,12 +83,17 @@ public:
     // Runs the focused item's action. Currently only "GOTO:<scene>" exists;
     // returns false for an item with no action, so "A did nothing" is
     // distinguishable from "A navigated".
-    bool Activate();
+    bool Activate(const std::string& item = std::string());   // (`item`: press that one, wherever focus is)
 
     // What A would do on the focused item right now: its action, or the
     // ACTIONIF alternative the app's state selects. Empty for none. For
     // main.cpp, which handles the verbs the navigator doesn't (GUIDE:, BACK).
-    std::string FocusedAction() const;
+    // (`item`: that item rather than the focused one -- a shortcut's.)
+    std::string FocusedAction(const std::string& item = std::string()) const;
+
+    // The item of the current scene that a controller button presses
+    // ("SHORTCUT button item"), or empty.
+    std::string ShortcutItem(const std::string& button) const;
 
     // A piece of the app's state (m_state), 0 if nothing has set it.
     int GetState(const std::string& name) const

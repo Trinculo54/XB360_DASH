@@ -15,9 +15,16 @@
 // ---------------------------------------------------------------------------
 #include "ppc_config.h"
 #include "ppc_context.h"
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <sys/mman.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 uint8_t* g_base = nullptr;
 
@@ -67,9 +74,15 @@ void sub_98021050(PPCContext& ctx, uint8_t* base)   // operator delete(void*)
 // ---- image loading --------------------------------------------------------
 bool RuntimeInit(const char* xexPath)
 {
+#ifdef _WIN32
+    // Committed rather than reserved: pages cost nothing until they are touched, and the title touches few.
+    void* mem = VirtualAlloc(nullptr, PPC_MEMORY_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!mem) { std::fprintf(stderr, "VirtualAlloc failed (%lu)\n", GetLastError()); return false; }
+#else
     void* mem = mmap(nullptr, PPC_MEMORY_SIZE, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (mem == MAP_FAILED) { std::perror("mmap"); return false; }
+#endif
     g_base = (uint8_t*)mem;
 
     // This XEX is stored uncompressed and unencrypted, so the basefile that

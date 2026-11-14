@@ -27,6 +27,7 @@ public:
         DPadRight = 0x0008,
         Start     = 0x0010,
         Back      = 0x0020,
+        LeftThumb = 0x0040,   // the left stick, clicked
         LeftShoulder  = 0x0100,
         RightShoulder = 0x0200,
         Guide     = 0x0400,   // only ever set via XInputGetStateEx -- see Gamepad.cpp
@@ -51,6 +52,10 @@ public:
     // A/B/X/Y deliberately don't repeat).
     bool WasPressed(Button button) const;
 
+    // The triggers are analogue and have no button bit: true on the frame one
+    // is pulled past XInput's own threshold.
+    bool WasTriggerPressed(bool right) const { return (m_triggersPressed & (right ? 2 : 1)) != 0; }
+
     // Controller 0's battery: 0 (empty) to 3 (full), or -1 when there is
     // nothing to report -- no controller, a wired one, or an XInput too old
     // to say (9_1_0 has no battery call).
@@ -73,6 +78,8 @@ private:
     uint16_t m_buttons = 0;      // current frame, d-pad bits include the stick
     uint16_t m_pressed = 0;      // went down (or repeated) this frame
     uint16_t m_heldDirections = 0;
+    uint8_t m_triggers = 0;         // bit 0 left, bit 1 right: past the threshold
+    uint8_t m_triggersPressed = 0;  // ...and went past it this frame
     float m_repeatTimer = 0.0f;
     bool m_repeating = false;
 };

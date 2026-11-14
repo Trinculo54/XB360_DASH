@@ -31,6 +31,8 @@
 //   ACTIONIF var value action        (inside an ITEM -- see ManifestItem::alternatives)
 //   HIDEIF var value                 (inside an ITEM -- see ManifestItem::hiddenIf)
 //   ENTER name value                 (app state it sets when it becomes the current scene -- see GetEnters)
+//   SHORTCUT button item             (a controller button that presses an item -- see GetShortcut)
+//   CARET var a r g b                (after a TEXT: an edit box -- see ManifestCommand::caretVar)
 //   SAY name text                    (a text variable's first value; a TEXT "{name}" draws it -- TextVars.h)
 //   IF var value ... ENDIF           (draw these only while `var` is `value`)
 //   VALUES count initial / WHEN value   (inside an ITEM -- see below)
@@ -219,6 +221,11 @@ struct ManifestCommand
     int vAlign = 0;                              // Text: 0 top, 1 center, 2 bottom
     std::string text;                             // Text
     bool quarterTurn = false;                     // Text: TEXTV -- see QuadRenderer::DrawTextAligned
+    // Text: "CARET var a r g b" on the line after makes it an edit box -- one
+    // line, cut off at the box's sides, with a caret bar at the byte offset
+    // the state variable `var` holds, and moved along to keep that in view.
+    int caretVar = -1;                            // (indexed as ifVar is; -1 for no caret)
+    ManifestColor caretColor;
     // Seconds for one full breath of a pulsing command, 0 for a still one.
     // The dashboard's page selector glows in and out while it has focus;
     // rather than special-casing that one element, any command can be marked
@@ -385,6 +392,21 @@ public:
     // buttons pressed.
     const std::vector<std::pair<std::string, int>>& GetEnters() const { return m_enters; }
 
+    // "SHORTCUT button item": a controller button that presses an item of
+    // this scene wherever focus is -- the keyboard's X is its Backspace key.
+    // Empty for a button the scene has no use for.
+    std::string GetShortcut(const std::string& button) const
+    {
+        for (const std::pair<std::string, std::string>& shortcut : m_shortcuts)
+        {
+            if (shortcut.first == button)
+            {
+                return shortcut.second;
+            }
+        }
+        return std::string();
+    }
+
     // Every variable an IF or WHEN in this scene names, indexed as
     // ManifestCommand::ifVar is.
     const std::vector<std::string>& GetVars() const { return m_vars; }
@@ -422,6 +444,7 @@ private:
     std::string m_after;    // see GetAfter
     std::vector<std::pair<std::string, int>> m_sets;   // see GetSets
     std::vector<std::pair<std::string, int>> m_enters; // see GetEnters
+    std::vector<std::pair<std::string, std::string>> m_shortcuts;   // see GetShortcut
     float m_canvasWidth = 0.0f;
     float m_canvasHeight = 0.0f;
     std::vector<ManifestCommand> m_commands;

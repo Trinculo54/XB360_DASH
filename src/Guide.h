@@ -54,7 +54,10 @@ public:
     // message box (a hub tile's "GUIDE:<scene>"), which B then closes.
     void Open(const std::string& scene);
     void Move(Navigator::Direction direction);
-    void Activate();                            // A
+    void Activate(const std::string& item = std::string());   // A (`item`: on that item, wherever focus is)
+    // A controller button the scene on show has a use for ("SHORTCUT"): the
+    // keyboard's X, Y, LB, RB, LT, RT, LS and START. False if it has none.
+    bool Shortcut(const std::string& button);
     void Back();                                // B
     // Y, the legend's "Xbox Home": put the guide away and ask for `scene`.
     void Home(const std::string& scene);

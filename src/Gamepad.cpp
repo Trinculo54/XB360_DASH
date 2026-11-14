@@ -81,6 +81,8 @@ void Gamepad::Update(float deltaSeconds)
         // doesn't leave a direction stuck repeating forever.
         m_buttons = 0;
         m_heldDirections = 0;
+        m_triggers = 0;
+        m_triggersPressed = 0;
         m_repeating = false;
         return;
     }
@@ -97,6 +99,12 @@ void Gamepad::Update(float deltaSeconds)
 
     m_pressed = static_cast<uint16_t>(buttons & ~m_buttons);
     m_buttons = buttons;
+
+    // (30 of 255: XINPUT_GAMEPAD_TRIGGER_THRESHOLD)
+    const uint8_t triggers = static_cast<uint8_t>((state.Gamepad.bLeftTrigger > 30 ? 1 : 0)
+        | (state.Gamepad.bRightTrigger > 30 ? 2 : 0));
+    m_triggersPressed = static_cast<uint8_t>(triggers & ~m_triggers);
+    m_triggers = triggers;
 
     // Auto-repeat, directions only. A newly pressed direction restarts the
     // timer at the long initial delay; holding past it repeats at the short

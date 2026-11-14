@@ -99,6 +99,7 @@ bool SceneManifest::LoadFromFile(const std::wstring& path)
     m_after.clear();
     m_sets.clear();
     m_enters.clear();
+    m_shortcuts.clear();
     m_vars.clear();
     int currentTrack = -1;   // the TRACK block being read, -1 outside one
     int ifVar = -1;          // the IF / WHEN in force, -1 for none
@@ -439,6 +440,13 @@ bool SceneManifest::LoadFromFile(const std::wstring& path)
             }
             continue;
         }
+        if (cmd == "SHORTCUT")
+        {
+            std::string button, item;
+            iss >> button >> item;
+            m_shortcuts.emplace_back(button, item);
+            continue;
+        }
         if (cmd == "ENTER")
         {
             std::string name;
@@ -516,6 +524,16 @@ bool SceneManifest::LoadFromFile(const std::wstring& path)
             c.pulseFloor = pulseFloor;
             c.fontFile = fontFile;
             sink->push_back(std::move(c));
+        }
+        else if (cmd == "CARET")
+        {
+            if (!sink->empty())
+            {
+                ManifestCommand& edit = sink->back();
+                std::string name;
+                iss >> name >> edit.caretColor.a >> edit.caretColor.r >> edit.caretColor.g >> edit.caretColor.b;
+                edit.caretVar = VarIndex(name);
+            }
         }
         else if (cmd == "GRADIENT_RECT")
         {

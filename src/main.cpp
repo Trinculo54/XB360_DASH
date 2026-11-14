@@ -165,6 +165,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     // these arrive when something happens, not on demand.
     bool pendingNotify = false;
     bool pendingY = false;       // only the guide listens: its legend's "Xbox Home"
+    // X, START, LT, RT and LS (the left stick clicked), by those names: only
+    // a scene's own shortcuts listen ("SHORTCUT" -- the keyboard's).
+    std::vector<const char*> pendingButtons;
     window.OnKeyDown = [&](uint32_t vk)
     {
         switch (vk)
@@ -181,6 +184,13 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         case 'E': pendingPage = +1; break;
         case VK_HOME: case 'G': pendingGuide = true; break;
         case 'Y': pendingY = true; break;
+        // ...and the rest of the pad, for the same reason: X, Tab for Start,
+        // Z and C for the triggers, F for the left stick's click.
+        case 'X': pendingButtons.push_back("X"); break;
+        case VK_TAB: pendingButtons.push_back("START"); break;
+        case 'Z': pendingButtons.push_back("LT"); break;
+        case 'C': pendingButtons.push_back("RT"); break;
+        case 'F': pendingButtons.push_back("LS"); break;
         case 'N': pendingNotify = true; break;
         default: break;
         }
@@ -253,6 +263,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             pendingPage = 0;
             pendingGuide = false;
             pendingY = false;
+            pendingButtons.clear();
 
             bootSeconds += deltaSeconds;
             if (skip || !boot.Update(renderer.GetContext(), bootSeconds))
@@ -301,6 +312,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
             if (gamepad.WasPressed(Gamepad::RightShoulder)) pendingPage = +1;
             if (gamepad.WasPressed(Gamepad::Guide))     pendingGuide = true;
             if (gamepad.WasPressed(Gamepad::Y))         pendingY = true;
+            if (gamepad.WasPressed(Gamepad::X))         pendingButtons.push_back("X");
+            if (gamepad.WasPressed(Gamepad::Start))     pendingButtons.push_back("START");
+            if (gamepad.WasPressed(Gamepad::LeftThumb)) pendingButtons.push_back("LS");
+            if (gamepad.WasTriggerPressed(false))       pendingButtons.push_back("LT");
+            if (gamepad.WasTriggerPressed(true))        pendingButtons.push_back("RT");
         }
 
         // Not while the hub is still arriving: it isn't taking input yet, and
@@ -322,19 +338,39 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
         {
             // Every input belongs to the guide while it is up; the dashboard
             // underneath keeps animating but hears nothing.
+            // A button the scene on show has a use of its own for goes to
+            // that first ("SHORTCUT": the keyboard's X is Backspace; a pass
+            // code is made of the d-pad's directions, not moved about with
+            // them). Otherwise Y is the tabs' "Xbox Home", the d-pad and A
+            // are themselves, and the rest are nothing.
             for (Navigator::Direction dir : pendingMoves)
             {
-                guide.Move(dir);
+                const char* name = (dir == Navigator::Direction::Up) ? "UP" : (dir == Navigator::Direction::Down) ? "DOWN"
+                    : (dir == Navigator::Direction::Left) ? "LEFT" : "RIGHT";
+                if (!guide.Shortcut(name))
+                {
+                    guide.Move(dir);
+                }
             }
-            if (pendingActivate) guide.Activate();
+            if (pendingActivate && !guide.Shortcut("A")) guide.Activate();
             if (pendingBack)     guide.Back();
-            if (pendingY)        guide.Home(FileUtil::WideToUtf8(kStartScene));
+            const bool yTaken = pendingY && guide.Shortcut("Y");
+            if (pendingPage != 0)
+            {
+                guide.Shortcut(pendingPage < 0 ? "LB" : "RB");
+            }
+            for (const char* button : pendingButtons)
+            {
+                guide.Shortcut(button);
+            }
+            if (pendingY && !yTaken) guide.Home(FileUtil::WideToUtf8(kStartScene));
             pendingMoves.clear();
             pendingActivate = false;
             pendingBack = false;
             pendingPage = 0;
         }
         pendingY = false;
+        pendingButtons.clear();
 
         for (Navigator::Direction dir : pendingMoves)
         {
