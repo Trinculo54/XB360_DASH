@@ -412,8 +412,18 @@ void Scene::Draw(QuadRenderer& renderer, const FocusWeights& weights, float scro
     // unfaded, also stops the identical-twist case (moving between two tiles
     // on the SAME page) from compositing two half-alpha copies and dipping
     // in brightness for the duration of the morph.
+    //
+    // Every OTHER item still easing keeps its resting fixed commands. On a
+    // page that does not scroll the tiles themselves are LAYER fixed (My
+    // Apps, the sign-in pages), and with nothing drawn here a tile vanished
+    // from the moment focus moved until its weight ran down to 0. The hub's
+    // items have no fixed commands at rest, so this adds nothing there.
     if (!active.empty() && wantFixed)
     {
+        for (size_t i = 0; i + 1 < active.size(); ++i)
+        {
+            DrawCommands(renderer, active[i].second->normal, scrollX, timeSeconds, Layer::FixedOnly);
+        }
         const ManifestItem& top = *active.back().second;
         DrawCommands(renderer, top.focus.empty() ? top.normal : top.focus, scrollX, timeSeconds, Layer::FixedOnly);
     }
