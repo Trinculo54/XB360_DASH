@@ -39,8 +39,6 @@ add_executable(DashX360Native WIN32
     src/VideoPlayer.h
     src/BootAnimation.cpp
     src/BootAnimation.h
-    src/BootAnimAssets.cpp
-    src/BootAnimAssets.h
     third_party/stb_truetype.h
     third_party/miniaudio.h
 )

@@ -38,7 +38,8 @@ uint8_t* g_base = nullptr;
 // exercise is that the data paths touch none of them, so a hit means the
 // entry point chosen was not as self-contained as the static analysis said.
 static void Trap(const char* name) { std::fprintf(stderr, "\n!! guest called import %s\n", name); std::exit(3); }
-#define IMPORT_STUB(name) void __imp__##name(PPCContext& ctx, uint8_t* base) { (void)ctx; (void)base; Trap(#name); }
+// (weak, so a tool that has an answer for an import defines it and that is the one linked)
+#define IMPORT_STUB(name) __attribute__((weak)) void __imp__##name(PPCContext& ctx, uint8_t* base) { (void)ctx; (void)base; Trap(#name); }
 #include "import_stubs.inc"
 
 void _xstart(PPCContext& ctx, uint8_t* base) { (void)ctx; (void)base; Trap("_xstart"); }

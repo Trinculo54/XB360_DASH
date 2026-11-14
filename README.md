@@ -1163,6 +1163,34 @@ case (`sharedres://ico_32x_camera.png` is `ico_32x_camera.PNG` in the pack).
 
 `hub_build.py` cooks the gamer picture as the thirteen `IF gamerpic`
 alternatives.
+## The boot animation
+
+The start-up animation is the console's own, drawn live. `bootanim.xex` was
+recompiled to C++ (XenonRecomp), and `tools\bootanim_extract\capture.cpp` runs
+its init, tick and frame routines headless and records what they hand to
+Direct3D: every draw with its vertices, shader constants, textures, samplers
+and render states, every render-target switch, clear and resolve, 391 frames
+at 60 Hz. `shaders.py` beside it turns the title's 17 shaders (XenosRecomp's
+HLSL) into ones `fxc` compiles. `src\BootAnimation.cpp` issues the recorded
+calls again on Direct3D 11 with those shaders, so the ribbons, the sphere, its
+lighting, the floor's shadow, the wordmark and the glow are whatever the title
+drew. Nothing is a video and nothing is modelled.
+
+What is the replayer's and not the title's is the mapping of one API onto the
+other: Direct3D 9's half-pixel rule, the alpha test as a `clip`, the console's
+EDRAM surfaces as render targets (4x multisampled where the title's are), and
+its tiled rendering of the scene as one surface the size of the picture.
+
+Checked against a capture of a console: the finished logo lands on the same
+pixels (the green's bounds agree to one pixel) and the wordmark is the title's
+own `#77BB44` and `#A4A4A7`. The capture itself is a few levels darker and more
+saturated throughout, as video of a console's output is; the app shows the
+title's front buffer as rendered.
+
+`assets\bootanim\` (`trace.bin` and `shaderNN.vs.cso` / `.ps.cso`) is made by
+those two tools and, like everything derived from the console, is not in the
+repository: `tools\bootanim_extract\BUILD.md` has the commands.
+
 ## Layout
 
 ```

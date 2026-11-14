@@ -116,20 +116,15 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     {
         OutputDebugStringA(("DashX360Native: sound disabled -- " + audio.GetLastError() + "\n").c_str());
     }
-    // The console's boot animation, rendered rather than played back. The
-    // geometry and the per-frame transforms in assets\bootanim were extracted
-    // from the real bootanim.xex (see tools\bootanim_extract), so this draws
-    // the console's own orb with the console's own motion, at whatever
-    // resolution the window happens to be -- which is the point: the 78MB of
-    // H.264 it replaces was locked to 1080p and cost a decode per frame.
+    // The console's boot animation, rendered rather than played back:
+    // assets\bootanim holds a recording of the Direct3D calls the real
+    // bootanim.xex makes and its own shaders (see tools\bootanim_extract),
+    // and BootAnimation issues them again, at the title's own 1280x720.
     //
-    // Its soundtrack still comes from assets\sounds\boot.wav through
-    // AudioEngine, started on the same frame as the first rendered one.
-    // Absent or unopenable data, and the dashboard simply comes straight up.
-    //
-    // Rendered at the window size as it stands when the boot begins. A resize
-    // mid-boot keeps the original size for the few seconds it runs rather
-    // than reallocating the targets underneath it.
+    // Its soundtrack comes from assets\sounds\boot.wav (the title's own
+    // sound) through AudioEngine, started on the same frame as the first
+    // rendered one. Absent or unopenable data, and the dashboard simply
+    // comes straight up.
     BootAnimation boot;
     bool booting = boot.Open(renderer.GetDevice(), exeDir + L"assets\\bootanim",
                              window.GetWidth(), window.GetHeight());

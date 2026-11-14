@@ -2,545 +2,803 @@
 
 #include <windows.h>
 #include <d3dcompiler.h>
+
+#include <algorithm>
 #include <cstring>
-#include <string>
-#include <vector>
+#include <fstream>
 
-namespace {
+// See BootAnimation.h: this replays a recording of the title's Direct3D calls.
+// The recording's layout is capture.cpp's WriteFile; the commands are below.
 
-// One HLSL source for the whole effect. Compiled at runtime the same way
-// QuadRenderer does its own, so there is no build step and no .cso to keep in
-// sync with the source.
-//
-// The matrix convention comes from the console: the vertex shader constants
-// hold the transform such that clip.x = dot(position, c0), clip.y =
-// dot(position, c1) and so on. Four consecutive registers are therefore four
-// rows, which is why the matrices are declared row_major -- HLSL's default is
-// column-major, and under that default the same bytes would be read as
-// columns and the whole scene would come out transposed. Declaring it means
-// the baked matrices upload byte for byte with no fixup.
-const char* kShaderSource = R"HLSL(
-
-cbuffer MeshCB : register(b0)
+namespace
 {
-    row_major float4x4 gWVP;    // rows are the four constant registers
-    row_major float4x4 gWorld;
-    float4   gBaseColor;  // rgb = albedo, a = emissive strength
-    float4   gParams;     // x = rim power, y = rim strength, z = fade, w unused
-};
+enum : uint32_t { kCmdTarget = 1, kCmdClear, kCmdResolve, kCmdDraw, kCmdVsConst, kCmdPsConst, kCmdPresent };
+// A draw's words: the command, then these twelve, the render states, the eight
+// texture stages, the eight samplers.
+enum { kPrim = 1, kIndexed, kStart, kCount, kVs, kPs, kDecl, kStride, kVOffset, kVSize, kIOffset, kISize, kStates };
+// The render states, in capture.cpp's order. The numbers in them are the
+// Xbox 360's own D3D enums, which are the GPU's: compare 0..7 from NEVER to
+// ALWAYS, blend 0 ZERO / 1 ONE / 4.. as Factor has them, cull 0 NONE / 2 CW /
+// 6 CCW, colour write a mask of R, G, B, A from bit 0.
+enum { kZEnable, kZWrite, kZFunc, kCull, kBlendEnable, kSrcBlend, kDestBlend, kAlphaTest, kAlphaFunc, kAlphaRef, kColorWrite };
 
-cbuffer PostCB : register(b1)
+// Vertex data at or under this size is a ribbon or a quad, new every frame;
+// anything larger is a mesh, the same bytes throughout. (A ribbon is 21,840.)
+constexpr uint32_t kStaticOver = 22000;
+constexpr uint32_t kDynamicVBSize = 4u << 20, kDynamicIBSize = 64u << 10;
+
+bool ReadAll(const std::wstring& path, std::vector<uint8_t>& out)
 {
-    float4 gTexel;        // xy = 1/size of the source being sampled
-    float4 gPost;         // x = blur direction (0 = horizontal), y = glow gain
-};
-
-Texture2D    gTex    : register(t0);
-Texture2D    gGlow   : register(t1);
-SamplerState gSamp   : register(s0);
-
-struct MeshVS { float3 pos : POSITION; float3 nrm : NORMAL; float2 uv : TEXCOORD0; };
-struct MeshPS { float4 pos : SV_Position; float3 nrm : TEXCOORD0; float3 wpos : TEXCOORD1; float2 uv : TEXCOORD2; };
-
-MeshPS VSMesh(MeshVS i)
-{
-    MeshPS o;
-    float4 p = float4(i.pos, 1.0);
-    o.pos  = mul(gWVP, p);
-    o.wpos = mul(gWorld, p).xyz;
-    o.nrm  = normalize(mul((float3x3)gWorld, i.nrm));
-    o.uv   = i.uv;
-    return o;
-}
-
-// The original runs five directional lights and two spots through a shader
-// with a per-material colour and an alpha gradient. This is the readable
-// stand-in: one key, one fill, and a rim term that does the work the spots
-// were doing on the silhouette.
-float4 PSMesh(MeshPS i) : SV_Target
-{
-    float3 n = normalize(i.nrm);
-
-    const float3 kKeyDir  = normalize(float3(-0.35, 0.72, -0.60));
-    const float3 kFillDir = normalize(float3( 0.55, 0.15,  0.45));
-    // The camera barely moves in world space once the orb has settled -- it
-    // is the orb that rotates -- so a fixed view direction is close enough
-    // for a rim term and avoids threading a camera position through.
-    const float3 kView    = float3(0.0, 0.0, -1.0);
-
-    float key  = saturate(dot(n, kKeyDir));
-    float fill = saturate(dot(n, kFillDir)) * 0.35;
-    float amb  = 0.18 + 0.22 * saturate(n.y * 0.5 + 0.5);
-
-    float rim  = pow(saturate(1.0 - abs(dot(n, kView))), gParams.x) * gParams.y;
-
-    float3 lit = gBaseColor.rgb * (amb + key * 0.85 + fill) + gBaseColor.rgb * rim;
-    lit += gBaseColor.rgb * gBaseColor.a;              // emissive lift for the X
-
-    return float4(lit * gParams.z, gParams.z);
-}
-
-struct QuadPS { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
-
-// A single oversized triangle rather than a quad: no seam down the diagonal,
-// one fewer vertex, and the UVs fall out of the clip coordinates.
-QuadPS VSQuad(uint id : SV_VertexID)
-{
-    QuadPS o;
-    float2 uv = float2((id << 1) & 2, id & 2);
-    o.uv  = uv;
-    o.pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
-    return o;
-}
-
-// Nine-tap Gaussian, separable. The original uses two shaders with six
-// offset and six weight constants each; this is the same idea with the
-// weights inline.
-float4 PSBlur(QuadPS i) : SV_Target
-{
-    float2 dir = (gPost.x < 0.5) ? float2(gTexel.x, 0.0) : float2(0.0, gTexel.y);
-    const float w[5] = { 0.2270270270, 0.1945945946, 0.1216216216, 0.0540540541, 0.0162162162 };
-    float4 c = gTex.Sample(gSamp, i.uv) * w[0];
-    [unroll] for (int k = 1; k < 5; ++k)
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f)
     {
-        float2 o = dir * (float)k * 1.6;
-        c += gTex.Sample(gSamp, i.uv + o) * w[k];
-        c += gTex.Sample(gSamp, i.uv - o) * w[k];
-    }
-    return c;
-}
-
-// Blended additively onto the scene target, so this returns the glow term on
-// its own -- adding the scene here as well would count it twice.
-float4 PSComposite(QuadPS i) : SV_Target
-{
-    float3 glow = gGlow.Sample(gSamp, i.uv).rgb;
-    return float4(glow * gPost.y, 0.0);
-}
-)HLSL";
-
-struct MeshCB
-{
-    float wvp[16];
-    float world[16];
-    float baseColor[4];
-    float params[4];
-};
-struct PostCB
-{
-    float texel[4];
-    float post[4];
-};
-
-// Small helper so every compile reports the same way and a shader error is
-// visible rather than a silently null pointer.
-bool CompileShader(const char* entry, const char* target, ID3DBlob** blob)
-{
-    Microsoft::WRL::ComPtr<ID3DBlob> errors;
-    UINT flags = D3DCOMPILE_OPTIMIZATION_LEVEL3;
-#ifdef _DEBUG
-    flags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-    HRESULT hr = D3DCompile(kShaderSource, std::strlen(kShaderSource),
-                            "BootAnimation.hlsl", nullptr, nullptr,
-                            entry, target, flags, 0, blob, errors.GetAddressOf());
-    if (FAILED(hr))
-    {
-        if (errors)
-            ::OutputDebugStringA((const char*)errors->GetBufferPointer());
         return false;
     }
-    return true;
+    out.resize(static_cast<size_t>(f.tellg()));
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(f);
 }
 
-} // namespace
+D3D11_BLEND Factor(uint32_t f)
+{
+    switch (f)
+    {
+    case 0:  return D3D11_BLEND_ZERO;
+    case 1:  return D3D11_BLEND_ONE;
+    case 4:  return D3D11_BLEND_SRC_COLOR;
+    case 5:  return D3D11_BLEND_INV_SRC_COLOR;
+    case 6:  return D3D11_BLEND_SRC_ALPHA;
+    case 7:  return D3D11_BLEND_INV_SRC_ALPHA;
+    case 8:  return D3D11_BLEND_DEST_COLOR;
+    case 9:  return D3D11_BLEND_INV_DEST_COLOR;
+    case 10: return D3D11_BLEND_DEST_ALPHA;
+    case 11: return D3D11_BLEND_INV_DEST_ALPHA;
+    default: return D3D11_BLEND_ONE;
+    }
+}
 
-BootAnimation::~BootAnimation() { Close(); }
+// The same factor for the alpha channel, where Direct3D 11 takes no colour factor.
+D3D11_BLEND AlphaFactor(uint32_t f)
+{
+    switch (f)
+    {
+    case 4: case 6:  return D3D11_BLEND_SRC_ALPHA;
+    case 5: case 7:  return D3D11_BLEND_INV_SRC_ALPHA;
+    case 8: case 10: return D3D11_BLEND_DEST_ALPHA;
+    case 9: case 11: return D3D11_BLEND_INV_DEST_ALPHA;
+    default:         return Factor(f);
+    }
+}
+}
+
+BootAnimation::~BootAnimation()
+{
+    Close();
+}
+
+// An Xbox 360 D3DFORMAT word: a depth format, and one whose alpha reads as 1
+// whatever was written (X8R8G8B8, which is every surface and every texture the
+// title resolves into -- the front buffers included).
+static bool IsDepth(uint32_t format) { return (format & 0x3F) == 0x16; }
+static bool AlphaIsOne(uint32_t format) { return (format >> 24) == 0x28; }
 
 void BootAnimation::Close()
 {
-    for (auto& m : m_mesh) { m.vb.Reset(); m.ib.Reset(); m.indexCount = 0; }
-    m_sceneTex.Reset(); m_depthTex.Reset();
-    m_sceneRTV.Reset(); m_sceneSRV.Reset(); m_depthDSV.Reset();
-    for (int i = 0; i < 2; ++i) { m_glowTex[i].Reset(); m_glowRTV[i].Reset(); m_glowSRV[i].Reset(); }
-    m_vsMesh.Reset(); m_vsQuad.Reset();
-    m_psMesh.Reset(); m_psBlur.Reset(); m_psComposite.Reset();
-    m_meshLayout.Reset(); m_cbMesh.Reset(); m_cbPost.Reset();
-    m_sampler.Reset(); m_rsSolid.Reset(); m_rsBackdrop.Reset();
-    m_dsWrite.Reset(); m_dsNone.Reset(); m_bsOpaque.Reset(); m_bsAdd.Reset();
+    m_frameSRV.Reset();
+    m_samplers.clear();
+    m_textures.clear();
+    m_surfaces.clear();
+    m_layouts.clear();
+    m_staticVB.clear();
+    m_staticIB.clear();
+    m_blends.clear();
+    m_depths.clear();
+    m_rasters.clear();
+    m_frames.clear();
+    m_file.clear();
+    m_file.shrink_to_fit();
     m_ready = false;
-    m_finished = false;
 }
 
-bool BootAnimation::Open(ID3D11Device* device, const std::wstring& assetDir,
-                         uint32_t width, uint32_t height)
+bool BootAnimation::Open(ID3D11Device* device, const std::wstring& assetDir, uint32_t, uint32_t)
 {
     Close();
-    if (!device || width == 0 || height == 0) return false;
-
-    // The asset loaders take narrow paths; the directory arrives wide to match
-    // how main builds it, so convert once here rather than templating them.
-    std::string dir;
-    if (!assetDir.empty())
-    {
-        int n = ::WideCharToMultiByte(CP_ACP, 0, assetDir.c_str(), (int)assetDir.size(),
-                                      nullptr, 0, nullptr, nullptr);
-        if (n <= 0) return false;
-        dir.resize((size_t)n);
-        ::WideCharToMultiByte(CP_ACP, 0, assetDir.c_str(), (int)assetDir.size(),
-                              &dir[0], n, nullptr, nullptr);
-    }
-
-    if (!m_meshData.Load(dir + "\\meshes.bin")) return false;
-    if (!m_frames.Load(dir + "\\frames.bin"))   return false;
-    if (m_meshData.Count() < 3)                 return false;
-
-    m_width  = width;
-    m_height = height;
-    m_glowW  = width  / 4 ? width  / 4 : 1;
-    m_glowH  = height / 4 ? height / 4 : 1;
-
-    if (!CreateShaders(device)) return false;
-    if (!CreateTargets(device)) return false;
-    if (!CreateMeshes(device))  return false;
-    if (!CreateStates(device))  return false;
-
-    m_ready = true;
     m_finished = false;
-    return true;
-}
-
-bool BootAnimation::CreateShaders(ID3D11Device* device)
-{
-    Microsoft::WRL::ComPtr<ID3DBlob> vsMesh, vsQuad, psMesh, psBlur, psComp;
-    if (!CompileShader("VSMesh",      "vs_5_0", vsMesh.GetAddressOf())) return false;
-    if (!CompileShader("VSQuad",      "vs_5_0", vsQuad.GetAddressOf())) return false;
-    if (!CompileShader("PSMesh",      "ps_5_0", psMesh.GetAddressOf())) return false;
-    if (!CompileShader("PSBlur",      "ps_5_0", psBlur.GetAddressOf())) return false;
-    if (!CompileShader("PSComposite", "ps_5_0", psComp.GetAddressOf())) return false;
-
-    if (FAILED(device->CreateVertexShader(vsMesh->GetBufferPointer(), vsMesh->GetBufferSize(), nullptr, &m_vsMesh))) return false;
-    if (FAILED(device->CreateVertexShader(vsQuad->GetBufferPointer(), vsQuad->GetBufferSize(), nullptr, &m_vsQuad))) return false;
-    if (FAILED(device->CreatePixelShader (psMesh->GetBufferPointer(), psMesh->GetBufferSize(), nullptr, &m_psMesh))) return false;
-    if (FAILED(device->CreatePixelShader (psBlur->GetBufferPointer(), psBlur->GetBufferSize(), nullptr, &m_psBlur))) return false;
-    if (FAILED(device->CreatePixelShader (psComp->GetBufferPointer(), psComp->GetBufferSize(), nullptr, &m_psComposite))) return false;
-
-    const D3D11_INPUT_ELEMENT_DESC layout[] =
+    m_device = device;
+    if (!LoadTrace(device, assetDir + L"\\trace.bin") || !LoadShaders(device, assetDir))
     {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        Close();
+        return false;
+    }
+
+    auto buffer = [&](UINT size, UINT bind, bool dynamic, ComPtr<ID3D11Buffer>& out)
+    {
+        D3D11_BUFFER_DESC d = {};
+        d.ByteWidth = size;
+        d.BindFlags = bind;
+        d.Usage = dynamic ? D3D11_USAGE_DYNAMIC : D3D11_USAGE_DEFAULT;
+        d.CPUAccessFlags = dynamic ? D3D11_CPU_ACCESS_WRITE : 0;
+        return SUCCEEDED(device->CreateBuffer(&d, nullptr, out.GetAddressOf()));
     };
-    if (FAILED(device->CreateInputLayout(layout, 3, vsMesh->GetBufferPointer(),
-                                         vsMesh->GetBufferSize(), &m_meshLayout))) return false;
-
-    D3D11_BUFFER_DESC cb = {};
-    cb.Usage = D3D11_USAGE_DYNAMIC;
-    cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    cb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    cb.ByteWidth = sizeof(MeshCB);
-    if (FAILED(device->CreateBuffer(&cb, nullptr, &m_cbMesh))) return false;
-    cb.ByteWidth = sizeof(PostCB);
-    if (FAILED(device->CreateBuffer(&cb, nullptr, &m_cbPost))) return false;
+    bool ok = buffer(kDynamicVBSize, D3D11_BIND_VERTEX_BUFFER, true, m_dynamicVB)
+            && buffer(kDynamicIBSize, D3D11_BIND_INDEX_BUFFER, true, m_dynamicIB)
+            && buffer(16, D3D11_BIND_VERTEX_BUFFER, false, m_zeroVB)
+            && buffer(m_vsRegs * 16, D3D11_BIND_CONSTANT_BUFFER, true, m_cbVs)
+            && buffer(m_psRegs * 16, D3D11_BIND_CONSTANT_BUFFER, true, m_cbPs)
+            && buffer(16, D3D11_BIND_CONSTANT_BUFFER, true, m_cbShared);
+    // (see MakeOpaque)
+    static const char kOpaque[] =
+        "float4 VS(uint id : SV_VertexID) : SV_Position { return float4(id == 2 ? 3.0 : -1.0, id == 1 ? 3.0 : -1.0, 0.0, 1.0); }\n"
+        "float4 PS() : SV_Target { return float4(0.0, 0.0, 0.0, 1.0); }\n";
+    ComPtr<ID3DBlob> vsCode, psCode;
+    D3D11_BLEND_DESC alphaOnly = {};
+    alphaOnly.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALPHA;
+    ok = ok && SUCCEEDED(D3DCompile(kOpaque, sizeof(kOpaque) - 1, nullptr, nullptr, nullptr, "VS", "vs_4_0", 0, 0, vsCode.GetAddressOf(), nullptr))
+            && SUCCEEDED(D3DCompile(kOpaque, sizeof(kOpaque) - 1, nullptr, nullptr, nullptr, "PS", "ps_4_0", 0, 0, psCode.GetAddressOf(), nullptr))
+            && SUCCEEDED(device->CreateVertexShader(vsCode->GetBufferPointer(), vsCode->GetBufferSize(), nullptr, m_opaqueVS.ReleaseAndGetAddressOf()))
+            && SUCCEEDED(device->CreatePixelShader(psCode->GetBufferPointer(), psCode->GetBufferSize(), nullptr, m_opaquePS.ReleaseAndGetAddressOf()))
+            && SUCCEEDED(device->CreateBlendState(&alphaOnly, m_alphaOnly.ReleaseAndGetAddressOf()));
+    if (!ok)
+    {
+        Close();
+        return false;
+    }
+    m_vbCursor = m_ibCursor = 0;
+    m_ready = true;
     return true;
 }
 
-bool BootAnimation::CreateTargets(ID3D11Device* device)
+bool BootAnimation::LoadTrace(ID3D11Device* device, const std::wstring& path)
 {
-    auto makeRT = [&](uint32_t w, uint32_t h, DXGI_FORMAT fmt,
-                      ID3D11Texture2D** tex, ID3D11RenderTargetView** rtv,
-                      ID3D11ShaderResourceView** srv) -> bool
+    if (!ReadAll(path, m_file) || m_file.size() < 44 || std::memcmp(m_file.data(), "BATRACE2", 8) != 0)
     {
+        return false;
+    }
+    const uint8_t* p = m_file.data() + 8;
+    const uint8_t* end = m_file.data() + m_file.size();
+    auto u32 = [&]() { uint32_t v = 0; if (p + 4 <= end) { std::memcpy(&v, p, 4); } p += 4; return v; };
+    const uint32_t frames = u32();
+    m_fps = static_cast<float>(u32()) / 1000.0f;
+    m_vsRegs = u32();
+    m_psRegs = u32();
+    m_stateCount = u32();
+    const uint32_t textures = u32(), surfaces = u32(), decls = u32();
+    m_poolSize = u32();
+    if (m_vsRegs == 0 || m_psRegs == 0 || m_vsRegs > 256 || m_psRegs > 256 || m_stateCount <= kColorWrite || m_fps <= 0.0f)
+    {
+        return false;
+    }
+    m_vsConst.assign(m_vsRegs * 4, 0.0f);
+    m_psConst.assign(m_psRegs * 4, 0.0f);
+
+    m_textures.resize(textures);
+    for (Texture& t : m_textures)
+    {
+        t.w = u32();
+        t.h = u32();
+        t.format = u32();
+        t.target = u32() != 0;
+        if (t.w == 0 || t.h == 0 || t.w > 8192 || t.h > 8192)
+        {
+            return false;
+        }
         D3D11_TEXTURE2D_DESC d = {};
-        d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1;
-        d.Format = fmt; d.SampleDesc.Count = 1;
-        d.Usage = D3D11_USAGE_DEFAULT;
-        d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(device->CreateTexture2D(&d, nullptr, tex))) return false;
-        if (FAILED(device->CreateRenderTargetView(*tex, nullptr, rtv))) return false;
-        if (FAILED(device->CreateShaderResourceView(*tex, nullptr, srv))) return false;
-        return true;
-    };
+        d.Width = t.w;
+        d.Height = t.h;
+        d.MipLevels = 1;
+        d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        d.SampleDesc.Count = 1;
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE | (t.target ? D3D11_BIND_RENDER_TARGET : 0);     // (see MakeOpaque)
+        std::vector<uint8_t> rgba;
+        D3D11_SUBRESOURCE_DATA init = {};
+        if (!t.target)
+        {
+            // As the title wrote them: big-endian ARGB words, so A, R, G, B in memory.
+            const size_t bytes = static_cast<size_t>(t.w) * t.h * 4;
+            if (p + bytes > end)
+            {
+                return false;
+            }
+            rgba.resize(bytes);
+            for (size_t i = 0; i < bytes; i += 4)
+            {
+                rgba[i] = p[i + 1];
+                rgba[i + 1] = p[i + 2];
+                rgba[i + 2] = p[i + 3];
+                rgba[i + 3] = p[i];
+            }
+            p += bytes;
+            init.pSysMem = rgba.data();
+            init.SysMemPitch = t.w * 4;
+        }
+        if (FAILED(device->CreateTexture2D(&d, t.target ? nullptr : &init, t.texture.GetAddressOf()))
+            || FAILED(device->CreateShaderResourceView(t.texture.Get(), nullptr, t.srv.GetAddressOf()))
+            || (t.target && FAILED(device->CreateRenderTargetView(t.texture.Get(), nullptr, t.rtv.GetAddressOf()))))
+        {
+            return false;
+        }
+    }
 
-    // Half-float colour: the glow sums several bright passes and 8-bit clips
-    // the highlights into flat white before the composite gets to them.
-    if (!makeRT(m_width, m_height, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                &m_sceneTex, &m_sceneRTV, &m_sceneSRV)) return false;
-    for (int i = 0; i < 2; ++i)
-        if (!makeRT(m_glowW, m_glowH, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                    &m_glowTex[i], &m_glowRTV[i], &m_glowSRV[i])) return false;
+    // An EDRAM surface is a render target, multisampled as the title asked,
+    // with a depth buffer of its own; the title never samples one, it
+    // resolves it into a texture first. Its depth surfaces are in the list
+    // too and get nothing: the title pairs each with one colour surface and
+    // carries no depth from one to another, which is what a depth buffer per
+    // colour surface gives.
+    m_surfaces.resize(surfaces);
+    for (Surface& s : m_surfaces)
+    {
+        s.w = u32();
+        s.h = u32();
+        s.format = u32();
+        s.samples = u32();
+        if (s.w == 0 || s.h == 0 || s.w > 8192 || s.h > 8192)
+        {
+            return false;
+        }
+        if (IsDepth(s.format))
+        {
+            continue;
+        }
+        UINT levels = 0;
+        if (s.samples > 1 && (FAILED(device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM, s.samples, &levels)) || levels == 0))
+        {
+            s.samples = 1;
+        }
+        D3D11_TEXTURE2D_DESC d = {};
+        d.Width = s.w;
+        d.Height = s.h;
+        d.MipLevels = 1;
+        d.ArraySize = 1;
+        d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        d.SampleDesc.Count = s.samples;
+        d.BindFlags = D3D11_BIND_RENDER_TARGET;
+        if (FAILED(device->CreateTexture2D(&d, nullptr, s.color.GetAddressOf()))
+            || FAILED(device->CreateRenderTargetView(s.color.Get(), nullptr, s.rtv.GetAddressOf())))
+        {
+            return false;
+        }
+        d.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        d.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        if (FAILED(device->CreateTexture2D(&d, nullptr, s.depth.GetAddressOf()))
+            || FAILED(device->CreateDepthStencilView(s.depth.Get(), nullptr, s.dsv.GetAddressOf())))
+        {
+            return false;
+        }
+    }
 
-    D3D11_TEXTURE2D_DESC dd = {};
-    dd.Width = m_width; dd.Height = m_height; dd.MipLevels = 1; dd.ArraySize = 1;
-    dd.Format = DXGI_FORMAT_D32_FLOAT; dd.SampleDesc.Count = 1;
-    dd.Usage = D3D11_USAGE_DEFAULT; dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    if (FAILED(device->CreateTexture2D(&dd, nullptr, &m_depthTex))) return false;
-    if (FAILED(device->CreateDepthStencilView(m_depthTex.Get(), nullptr, &m_depthDSV))) return false;
-    return true;
+    m_decls.resize(decls);
+    for (std::vector<uint32_t>& d : m_decls)
+    {
+        const uint32_t n = u32();
+        if (n > 64 || p + n * 4 > end)
+        {
+            return false;
+        }
+        d.resize(n);
+        for (uint32_t& w : d)
+        {
+            w = u32();
+        }
+    }
+
+    if (p + m_poolSize > end)
+    {
+        return false;
+    }
+    m_pool = p;
+    p += m_poolSize;
+
+    m_frames.resize(frames);
+    for (Frame& f : m_frames)
+    {
+        f.count = u32();
+        if (p + static_cast<size_t>(f.count) * 4 > end)
+        {
+            return false;
+        }
+        f.words = reinterpret_cast<const uint32_t*>(p);
+        p += static_cast<size_t>(f.count) * 4;
+    }
+    return !m_frames.empty();
 }
 
-bool BootAnimation::CreateMeshes(ID3D11Device* device)
+bool BootAnimation::LoadShaders(ID3D11Device* device, const std::wstring& dir)
 {
-    for (size_t i = 0; i < 3 && i < m_meshData.Count(); ++i)
+    for (int i = 0; i < kShaders; ++i)
     {
-        const BootMeshes::Mesh& src = m_meshData.At(i);
-        if (src.vertices.empty() || src.indices.empty()) return false;
-
-        D3D11_BUFFER_DESC bd = {};
-        D3D11_SUBRESOURCE_DATA sd = {};
-
-        bd.Usage = D3D11_USAGE_IMMUTABLE;
-        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        bd.ByteWidth = (UINT)(src.vertices.size() * sizeof(BootMeshes::Vertex));
-        sd.pSysMem = src.vertices.data();
-        if (FAILED(device->CreateBuffer(&bd, &sd, &m_mesh[i].vb))) return false;
-
-        bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
-        bd.ByteWidth = (UINT)(src.indices.size() * sizeof(uint16_t));
-        sd.pSysMem = src.indices.data();
-        if (FAILED(device->CreateBuffer(&bd, &sd, &m_mesh[i].ib))) return false;
-
-        m_mesh[i].indexCount = (uint32_t)src.indices.size();
+        wchar_t name[32];
+        std::vector<uint8_t> code;
+        swprintf_s(name, L"\\shader%02d.vs.cso", i);
+        if (ReadAll(dir + name, code))
+        {
+            if (FAILED(device->CreateVertexShader(code.data(), code.size(), nullptr, m_vs[i].ReleaseAndGetAddressOf())))
+            {
+                return false;
+            }
+            m_vsCode[i] = std::move(code);
+            continue;
+        }
+        swprintf_s(name, L"\\shader%02d.ps.cso", i);
+        if (!ReadAll(dir + name, code)
+            || FAILED(device->CreatePixelShader(code.data(), code.size(), nullptr, m_ps[i].ReleaseAndGetAddressOf())))
+        {
+            return false;
+        }
     }
     return true;
 }
 
-bool BootAnimation::CreateStates(ID3D11Device* device)
+// The title's vertex declaration as an input layout for one of its vertex
+// shaders. A declaration is 12-byte elements -- stream and offset, a type,
+// then method / usage / usage index -- ended by stream 0xFF. Direct3D 11
+// wants every input a shader reads; one the declaration lacks reads zeros,
+// from a buffer of them stepped per instance.
+ID3D11InputLayout* BootAnimation::Layout(uint32_t decl, uint32_t vs)
 {
-    D3D11_SAMPLER_DESC sd = {};
-    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.MaxLOD = D3D11_FLOAT32_MAX;
-    if (FAILED(device->CreateSamplerState(&sd, &m_sampler))) return false;
+    const uint32_t key = (decl << 8) | vs;
+    auto found = m_layouts.find(key);
+    if (found != m_layouts.end())
+    {
+        return found->second.Get();
+    }
+    ComPtr<ID3D11InputLayout>& layout = m_layouts[key];
+    if (decl >= m_decls.size() || m_vsCode[vs].empty())
+    {
+        return nullptr;
+    }
+    static const char* const kNames[] = { "POSITION", "NORMAL", "TEXCOORD", "COLOR" };
+    bool have[4] = {};
+    std::vector<D3D11_INPUT_ELEMENT_DESC> elements;
+    const std::vector<uint32_t>& w = m_decls[decl];
+    for (size_t i = 0; i + 2 < w.size(); i += 3)
+    {
+        if ((w[i] >> 16) == 0xFF)
+        {
+            break;
+        }
+        const uint32_t usage = (w[i + 2] >> 16) & 0xFF;
+        const int name = (usage == 0) ? 0 : (usage == 3) ? 1 : (usage == 5) ? 2 : (usage == 10) ? 3 : -1;
+        if (name < 0)
+        {
+            continue;
+        }
+        D3D11_INPUT_ELEMENT_DESC e = {};
+        e.SemanticName = kNames[name];
+        e.SemanticIndex = (w[i + 2] >> 8) & 0xFF;
+        e.AlignedByteOffset = w[i] & 0xFFFF;
+        e.InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+        switch (w[i + 1])      // the Xbox 360's D3DDECLTYPE values
+        {
+        case 0x2C83A4: e.Format = DXGI_FORMAT_R32_FLOAT; break;
+        case 0x2C23A5: e.Format = DXGI_FORMAT_R32G32_FLOAT; break;
+        case 0x2A23B9: e.Format = DXGI_FORMAT_R32G32B32_FLOAT; break;
+        default:       e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; break;
+        }
+        have[name] = have[name] || e.SemanticIndex == 0;
+        elements.push_back(e);
+    }
+    for (int name = 0; name < 4; ++name)
+    {
+        if (!have[name])
+        {
+            D3D11_INPUT_ELEMENT_DESC e = {};
+            e.SemanticName = kNames[name];
+            e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            e.InputSlot = 1;
+            e.InputSlotClass = D3D11_INPUT_PER_INSTANCE_DATA;
+            elements.push_back(e);
+        }
+    }
+    m_device->CreateInputLayout(elements.data(), static_cast<UINT>(elements.size()), m_vsCode[vs].data(),
+        m_vsCode[vs].size(), layout.GetAddressOf());
+    return layout.Get();
+}
 
-    D3D11_RASTERIZER_DESC rd = {};
-    rd.FillMode = D3D11_FILL_SOLID;
-    rd.CullMode = D3D11_CULL_NONE;     // strips with degenerates, both windings
-    rd.DepthClipEnable = TRUE;
-    if (FAILED(device->CreateRasterizerState(&rd, &m_rsSolid))) return false;
-    rd.DepthClipEnable = FALSE;        // the backdrop sphere encloses the camera
-    if (FAILED(device->CreateRasterizerState(&rd, &m_rsBackdrop))) return false;
+ID3D11Buffer* BootAnimation::Static(std::unordered_map<uint32_t, ComPtr<ID3D11Buffer>>& cache, uint32_t offset,
+    uint32_t size, UINT bind)
+{
+    auto found = cache.find(offset);
+    if (found != cache.end())
+    {
+        return found->second.Get();
+    }
+    ComPtr<ID3D11Buffer>& buffer = cache[offset];
+    D3D11_BUFFER_DESC d = {};
+    d.ByteWidth = size;
+    d.Usage = D3D11_USAGE_IMMUTABLE;
+    d.BindFlags = bind;
+    D3D11_SUBRESOURCE_DATA init = {};
+    init.pSysMem = m_pool + offset;
+    m_device->CreateBuffer(&d, &init, buffer.GetAddressOf());
+    return buffer.Get();
+}
 
-    D3D11_DEPTH_STENCIL_DESC ds = {};
-    ds.DepthEnable = TRUE;
-    ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-    ds.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
-    if (FAILED(device->CreateDepthStencilState(&ds, &m_dsWrite))) return false;
-    ds.DepthEnable = FALSE;
-    ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-    if (FAILED(device->CreateDepthStencilState(&ds, &m_dsNone))) return false;
+// Appends to a dynamic buffer, starting it over when it is full.
+uint32_t BootAnimation::Transient(ID3D11DeviceContext* ctx, ID3D11Buffer* buffer, uint32_t& cursor, uint32_t capacity,
+    const void* data, uint32_t size, uint32_t align)
+{
+    cursor = (cursor + align - 1) / align * align;
+    const bool wrap = cursor + size > capacity;
+    if (wrap)
+    {
+        cursor = 0;
+        if (buffer == m_dynamicVB.Get())
+        {
+            m_placed.clear();
+        }
+    }
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (size <= capacity && SUCCEEDED(ctx->Map(buffer, 0, wrap ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE, 0, &mapped)))
+    {
+        std::memcpy(static_cast<uint8_t*>(mapped.pData) + cursor, data, size);
+        ctx->Unmap(buffer, 0);
+    }
+    const uint32_t at = cursor;
+    cursor += size;
+    return at;
+}
 
-    D3D11_BLEND_DESC bd = {};
-    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    if (FAILED(device->CreateBlendState(&bd, &m_bsOpaque))) return false;
+void BootAnimation::Draw(ID3D11DeviceContext* ctx, const uint32_t* d)
+{
+    const uint32_t vs = d[kVs], ps = d[kPs], count = d[kCount], stride = d[kStride];
+    const uint32_t vOffset = d[kVOffset], vSize = d[kVSize], iOffset = d[kIOffset], iSize = d[kISize];
+    const uint32_t* state = d + kStates;
+    const uint32_t* stage = state + m_stateCount;
+    if (m_target < 0 || !m_surfaces[m_target].rtv || vs >= kShaders || ps >= kShaders || !m_vs[vs] || !m_ps[ps] || count == 0 || vSize == 0
+        || stride == 0 || static_cast<uint64_t>(vOffset) + vSize > m_poolSize || static_cast<uint64_t>(iOffset) + iSize > m_poolSize)
+    {
+        return;
+    }
+    ID3D11InputLayout* layout = Layout(d[kDecl], vs);
+    if (!layout)
+    {
+        return;
+    }
+    const Surface& target = m_surfaces[m_target];
 
-    bd.RenderTarget[0].BlendEnable = TRUE;
-    bd.RenderTarget[0].SrcBlend  = D3D11_BLEND_ONE;
-    bd.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
-    bd.RenderTarget[0].BlendOp   = D3D11_BLEND_OP_ADD;
-    bd.RenderTarget[0].SrcBlendAlpha  = D3D11_BLEND_ONE;
-    bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
-    bd.RenderTarget[0].BlendOpAlpha   = D3D11_BLEND_OP_ADD;
-    if (FAILED(device->CreateBlendState(&bd, &m_bsAdd))) return false;
-    return true;
+    // Constants: the title's registers as they stand, and the two this
+    // replayer adds. Direct3D 9 puts pixel centres on whole numbers and
+    // Direct3D 11 on halves, so everything moves half a pixel right and down.
+    // The alpha test is a clip in the pixel shader, which keeps a pixel at or
+    // over the threshold: GREATER than the reference -- how the title always
+    // asks for it -- is the reference and the least bit more.
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (SUCCEEDED(ctx->Map(m_cbVs.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+    {
+        std::memcpy(mapped.pData, m_vsConst.data(), m_vsConst.size() * sizeof(float));
+        ctx->Unmap(m_cbVs.Get(), 0);
+    }
+    if (SUCCEEDED(ctx->Map(m_cbPs.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+    {
+        std::memcpy(mapped.pData, m_psConst.data(), m_psConst.size() * sizeof(float));
+        ctx->Unmap(m_cbPs.Get(), 0);
+    }
+    if (SUCCEEDED(ctx->Map(m_cbShared.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+    {
+        const bool test = state[kAlphaTest] != 0 && state[kAlphaFunc] == 4;
+        const float shared[4] = { 1.0f / static_cast<float>(target.w), -1.0f / static_cast<float>(target.h),
+                                  test ? static_cast<float>(state[kAlphaRef]) / 255.0f + 1e-6f : -1.0f, 0.0f };
+        std::memcpy(mapped.pData, shared, sizeof(shared));
+        ctx->Unmap(m_cbShared.Get(), 0);
+    }
+    ID3D11Buffer* vsBuffers[3] = { m_cbVs.Get(), nullptr, m_cbShared.Get() };
+    ID3D11Buffer* psBuffers[3] = { nullptr, m_cbPs.Get(), m_cbShared.Get() };
+    ctx->VSSetConstantBuffers(0, 3, vsBuffers);
+    ctx->PSSetConstantBuffers(0, 3, psBuffers);
+    ctx->VSSetShader(m_vs[vs].Get(), nullptr, 0);
+    ctx->PSSetShader(m_ps[ps].Get(), nullptr, 0);
+    ctx->IASetInputLayout(layout);
+
+    // Textures, each with the sampler the title had on its stage: address U
+    // and V in three bits each (the GPU's numbers: 0 wrap, 1 mirror, 2 clamp,
+    // 3 mirror once, 6 border), then magnify and minify (0 point, 1 linear).
+    // The textures have one level, so there is nothing to say about mips.
+    ID3D11ShaderResourceView* views[8] = {};
+    ID3D11SamplerState* samplers[8] = {};
+    for (int i = 0; i < 8; ++i)
+    {
+        if (stage[i] >= m_textures.size())
+        {
+            continue;
+        }
+        views[i] = m_textures[stage[i]].srv.Get();
+        const uint32_t word = stage[8 + i];
+        ComPtr<ID3D11SamplerState>& sampler = m_samplers[word];
+        if (!sampler)
+        {
+            auto address = [](uint32_t a)
+            {
+                return a == 0 ? D3D11_TEXTURE_ADDRESS_WRAP : a == 1 ? D3D11_TEXTURE_ADDRESS_MIRROR
+                     : a == 3 ? D3D11_TEXTURE_ADDRESS_MIRROR_ONCE : a >= 6 ? D3D11_TEXTURE_ADDRESS_BORDER : D3D11_TEXTURE_ADDRESS_CLAMP;
+            };
+            D3D11_SAMPLER_DESC sd = {};
+            sd.Filter = static_cast<D3D11_FILTER>((((word >> 8) & 3) ? 0x10 : 0) | (((word >> 6) & 3) ? 0x4 : 0));
+            sd.AddressU = address(word & 7);
+            sd.AddressV = address((word >> 3) & 7);
+            sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.MaxLOD = D3D11_FLOAT32_MAX;
+            m_device->CreateSamplerState(&sd, sampler.GetAddressOf());
+        }
+        samplers[i] = sampler.Get();
+    }
+    ctx->PSSetShaderResources(0, 8, views);
+    ctx->PSSetSamplers(0, 8, samplers);
+
+    // Render states, made the first time each combination is asked for.
+    const uint32_t depthKey = (state[kZEnable] ? 1u : 0u) | (state[kZWrite] ? 2u : 0u) | ((state[kZFunc] & 7u) << 2);
+    ComPtr<ID3D11DepthStencilState>& depth = m_depths[depthKey];
+    if (!depth)
+    {
+        static const D3D11_COMPARISON_FUNC kCompare[8] = {
+            D3D11_COMPARISON_NEVER, D3D11_COMPARISON_LESS, D3D11_COMPARISON_EQUAL, D3D11_COMPARISON_LESS_EQUAL,
+            D3D11_COMPARISON_GREATER, D3D11_COMPARISON_NOT_EQUAL, D3D11_COMPARISON_GREATER_EQUAL, D3D11_COMPARISON_ALWAYS };
+        D3D11_DEPTH_STENCIL_DESC dd = {};
+        dd.DepthEnable = state[kZEnable] != 0;
+        dd.DepthWriteMask = state[kZWrite] ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
+        dd.DepthFunc = kCompare[state[kZFunc] & 7u];
+        m_device->CreateDepthStencilState(&dd, depth.GetAddressOf());
+    }
+    const uint64_t blendKey = (state[kBlendEnable] ? 1ull : 0ull) | (static_cast<uint64_t>(state[kSrcBlend] & 0xFF) << 8)
+        | (static_cast<uint64_t>(state[kDestBlend] & 0xFF) << 16) | (static_cast<uint64_t>(state[kColorWrite] & 0xF) << 24);
+    ComPtr<ID3D11BlendState>& blend = m_blends[blendKey];
+    if (!blend)
+    {
+        D3D11_BLEND_DESC bd = {};
+        D3D11_RENDER_TARGET_BLEND_DESC& rt = bd.RenderTarget[0];
+        rt.BlendEnable = state[kBlendEnable] != 0;
+        rt.SrcBlend = Factor(state[kSrcBlend]);
+        rt.DestBlend = Factor(state[kDestBlend]);
+        rt.SrcBlendAlpha = AlphaFactor(state[kSrcBlend]);
+        rt.DestBlendAlpha = AlphaFactor(state[kDestBlend]);
+        rt.BlendOp = rt.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        rt.RenderTargetWriteMask = static_cast<UINT8>(state[kColorWrite] & 0xF);
+        m_device->CreateBlendState(&bd, blend.GetAddressOf());
+    }
+    // Culling clockwise triangles is culling back faces with counter-clockwise ones in front, and the reverse.
+    ComPtr<ID3D11RasterizerState>& raster = m_rasters[state[kCull]];
+    if (!raster)
+    {
+        D3D11_RASTERIZER_DESC rd = {};
+        rd.FillMode = D3D11_FILL_SOLID;
+        rd.CullMode = state[kCull] == 0 ? D3D11_CULL_NONE : D3D11_CULL_BACK;
+        rd.FrontCounterClockwise = state[kCull] == 2;
+        rd.DepthClipEnable = TRUE;
+        m_device->CreateRasterizerState(&rd, raster.GetAddressOf());
+    }
+    ctx->OMSetDepthStencilState(depth.Get(), 0);
+    ctx->OMSetBlendState(blend.Get(), nullptr, 0xFFFFFFFF);
+    ctx->RSSetState(raster.Get());
+
+    // Geometry.
+    ID3D11Buffer* buffers[2] = { nullptr, m_zeroVB.Get() };
+    UINT strides[2] = { stride, 16 }, offsets[2] = { 0, 0 };
+    if (vSize > kStaticOver)
+    {
+        buffers[0] = Static(m_staticVB, vOffset, vSize, D3D11_BIND_VERTEX_BUFFER);
+    }
+    else
+    {
+        auto placed = m_placed.find(vOffset);
+        if (placed == m_placed.end())
+        {
+            const uint32_t at = Transient(ctx, m_dynamicVB.Get(), m_vbCursor, kDynamicVBSize, m_pool + vOffset, vSize, 4);
+            placed = m_placed.emplace(vOffset, at).first;
+        }
+        buffers[0] = m_dynamicVB.Get();
+        offsets[0] = placed->second;
+    }
+    if (!buffers[0])
+    {
+        return;
+    }
+    ctx->IASetVertexBuffers(0, 2, buffers, strides, offsets);
+
+    // Primitives are the GPU's numbers: 4 a list, 5 a fan, 6 a strip, 13 a
+    // list of quads. Direct3D 11 has no fan and no quad, so those two are
+    // drawn as the triangles they are.
+    const uint32_t prim = d[kPrim];
+    const bool indexed = d[kIndexed] != 0 && iSize != 0;
+    if (prim == 5 || prim == 13)
+    {
+        std::vector<uint16_t> indices;
+        if (prim == 5)
+        {
+            for (uint32_t i = 1; i + 1 < count; ++i)
+            {
+                indices.insert(indices.end(), { static_cast<uint16_t>(0), static_cast<uint16_t>(i), static_cast<uint16_t>(i + 1) });
+            }
+        }
+        else
+        {
+            for (uint32_t q = 0; q + 3 < count; q += 4)
+            {
+                for (uint32_t k : { 0u, 1u, 2u, 0u, 2u, 3u })
+                {
+                    indices.push_back(static_cast<uint16_t>(q + k));
+                }
+            }
+        }
+        if (indices.empty())
+        {
+            return;
+        }
+        const uint32_t at = Transient(ctx, m_dynamicIB.Get(), m_ibCursor, kDynamicIBSize, indices.data(),
+            static_cast<uint32_t>(indices.size() * 2), 2);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->IASetIndexBuffer(m_dynamicIB.Get(), DXGI_FORMAT_R16_UINT, 0);
+        ctx->DrawIndexed(static_cast<UINT>(indices.size()), at / 2, indexed ? 0 : static_cast<INT>(d[kStart]));
+        return;
+    }
+    ctx->IASetPrimitiveTopology(prim == 4 ? D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+    if (indexed)
+    {
+        ID3D11Buffer* ib = Static(m_staticIB, iOffset, iSize, D3D11_BIND_INDEX_BUFFER);
+        if (ib)
+        {
+            ctx->IASetIndexBuffer(ib, DXGI_FORMAT_R16_UINT, 0);
+            ctx->DrawIndexed(count, d[kStart], 0);
+        }
+    }
+    else
+    {
+        ctx->Draw(count, d[kStart]);
+    }
+}
+
+// The current surface as the render target, the whole of it.
+void BootAnimation::Bind(ID3D11DeviceContext* ctx)
+{
+    if (m_target < 0)
+    {
+        ctx->OMSetRenderTargets(0, nullptr, nullptr);
+        return;
+    }
+    const Surface& s = m_surfaces[m_target];
+    ctx->OMSetRenderTargets(1, s.rtv.GetAddressOf(), s.dsv.Get());
+    const D3D11_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(s.w), static_cast<float>(s.h), 0.0f, 1.0f };
+    ctx->RSSetViewports(1, &vp);
+}
+
+// Writes alpha 1 over a texture and nothing else (see AlphaIsOne): one
+// triangle, the alpha channel the only one written.
+void BootAnimation::MakeOpaque(ID3D11DeviceContext* ctx, const Texture& t)
+{
+    const D3D11_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(t.w), static_cast<float>(t.h), 0.0f, 1.0f };
+    ctx->OMSetRenderTargets(1, t.rtv.GetAddressOf(), nullptr);
+    ctx->RSSetViewports(1, &vp);
+    ctx->OMSetBlendState(m_alphaOnly.Get(), nullptr, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(nullptr, 0);
+    ctx->RSSetState(nullptr);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(m_opaqueVS.Get(), nullptr, 0);
+    ctx->PSSetShader(m_opaquePS.Get(), nullptr, 0);
+    ctx->Draw(3, 0);
 }
 
 bool BootAnimation::Update(ID3D11DeviceContext* ctx, float elapsedSeconds)
 {
-    if (!m_ready || !ctx) return false;
-    if (elapsedSeconds >= Duration()) { m_finished = true; return false; }
-
-    const float* mats = m_frames.Matrices(elapsedSeconds);
-    if (!mats) { m_finished = true; return false; }
-
-    DrawScene(ctx, mats, m_frames.OrbVisible(elapsedSeconds));
-    DrawGlow(ctx);
-    Composite(ctx);
-    return true;
-}
-
-void BootAnimation::DrawScene(ID3D11DeviceContext* ctx, const float* mats, bool orbVisible)
-{
-    const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-    ctx->ClearRenderTargetView(m_sceneRTV.Get(), black);
-    ctx->ClearDepthStencilView(m_depthDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
-
-    ID3D11RenderTargetView* rtv = m_sceneRTV.Get();
-    ctx->OMSetRenderTargets(1, &rtv, m_depthDSV.Get());
-
-    D3D11_VIEWPORT vp = {};
-    vp.Width = (float)m_width; vp.Height = (float)m_height; vp.MaxDepth = 1.0f;
-    ctx->RSSetViewports(1, &vp);
-
-    ctx->IASetInputLayout(m_meshLayout.Get());
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    ctx->VSSetShader(m_vsMesh.Get(), nullptr, 0);
-    ctx->PSSetShader(m_psMesh.Get(), nullptr, 0);
-    ctx->OMSetBlendState(m_bsOpaque.Get(), nullptr, 0xFFFFFFFF);
-    ctx->OMSetDepthStencilState(m_dsWrite.Get(), 0);
-
-    ctx->RSSetState(m_rsSolid.Get());
-
-    ID3D11Buffer* cb = m_cbMesh.Get();
-    ctx->VSSetConstantBuffers(0, 1, &cb);
-    ctx->PSSetConstantBuffers(0, 1, &cb);
-
-    auto submit = [&](int meshIndex, const float* wvp, const float* world,
-                      const float rgb[3], float emissive, float rimPow,
-                      float rimStrength, float fade)
+    if (!m_ready)
     {
-        if (meshIndex < 0 || meshIndex > 2 || !m_mesh[meshIndex].vb) return;
-        D3D11_MAPPED_SUBRESOURCE map;
-        if (FAILED(ctx->Map(m_cbMesh.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
-        MeshCB* c = (MeshCB*)map.pData;
-        std::memcpy(c->wvp,   wvp,   16 * sizeof(float));
-        std::memcpy(c->world, world, 16 * sizeof(float));
-        c->baseColor[0] = rgb[0]; c->baseColor[1] = rgb[1];
-        c->baseColor[2] = rgb[2]; c->baseColor[3] = emissive;
-        c->params[0] = rimPow; c->params[1] = rimStrength; c->params[2] = fade; c->params[3] = 0.0f;
-        ctx->Unmap(m_cbMesh.Get(), 0);
-
-        UINT stride = sizeof(BootMeshes::Vertex), offset = 0;
-        ID3D11Buffer* vb = m_mesh[meshIndex].vb.Get();
-        ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
-        ctx->IASetIndexBuffer(m_mesh[meshIndex].ib.Get(), DXGI_FORMAT_R16_UINT, 0);
-        ctx->DrawIndexed(m_mesh[meshIndex].indexCount, 0, 0);
-    };
-
-    // The backdrop is mesh 0 again, drawn at ~160x radius around the camera:
-    // the title's own second transform, so its motion tracks the orb's.
-    // Whether it is present depends on the frame, and an identity matrix is
-    // how the capture records "not submitted".
-    const float* backWvp   = mats + 32;
-    const float* backWorld = mats + 48;
-    static const float kIdent[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    if (std::memcmp(backWvp, kIdent, sizeof kIdent) != 0)
-    {
-        const float backColor[3] = { 0.020f, 0.055f, 0.014f };
-        ctx->RSSetState(m_rsBackdrop.Get());
-        ctx->OMSetDepthStencilState(m_dsNone.Get(), 0);
-        submit(0, backWvp, backWorld, backColor, 0.35f, 1.0f, 0.0f, 1.0f);
-        ctx->OMSetDepthStencilState(m_dsWrite.Get(), 0);
+        return false;
     }
-
-    if (!orbVisible) return;
-
-    ctx->RSSetState(m_rsSolid.Get());
-    const float* wvp   = mats + 0;
-    const float* world = mats + 16;
-
-    // Colours read out of the title's own constant pool: the body sits around
-    // (80,160,40)/255 and the X inlay and its trim run up through the pale
-    // yellow-green the procedural textures are built from.
-    const float kBody[3] = { 0.314f, 0.627f, 0.157f };
-    const float kInlay[3] = { 0.596f, 0.847f, 0.157f };
-    const float kTrim[3] = { 0.937f, 0.980f, 0.443f };
-
-    submit(0, wvp, world, kBody,  0.00f, 2.5f, 0.35f, 1.0f);   // sphere
-    submit(1, wvp, world, kInlay, 0.25f, 2.0f, 0.30f, 1.0f);   // X inlay
-    submit(2, wvp, world, kTrim,  0.90f, 1.5f, 0.20f, 1.0f);   // X edge trim
-}
-
-void BootAnimation::DrawGlow(ID3D11DeviceContext* ctx)
-{
-    ID3D11ShaderResourceView* nullSRV[2] = { nullptr, nullptr };
-    ctx->OMSetRenderTargets(0, nullptr, nullptr);
-
-    D3D11_VIEWPORT vp = {};
-    vp.Width = (float)m_glowW; vp.Height = (float)m_glowH; vp.MaxDepth = 1.0f;
-    ctx->RSSetViewports(1, &vp);
-
-    ctx->IASetInputLayout(nullptr);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(m_vsQuad.Get(), nullptr, 0);
-    ctx->PSSetShader(m_psBlur.Get(), nullptr, 0);
-    ctx->OMSetDepthStencilState(m_dsNone.Get(), 0);
-    ctx->OMSetBlendState(m_bsOpaque.Get(), nullptr, 0xFFFFFFFF);
-    ctx->RSSetState(m_rsSolid.Get());
-
-    ID3D11SamplerState* samp = m_sampler.Get();
-    ctx->PSSetSamplers(0, 1, &samp);
-    ID3D11Buffer* cb = m_cbPost.Get();
-    ctx->PSSetConstantBuffers(1, 1, &cb);
-
-    auto pass = [&](ID3D11ShaderResourceView* src, ID3D11RenderTargetView* dst,
-                    float srcW, float srcH, float dir)
+    if (elapsedSeconds >= Duration())
     {
-        ctx->PSSetShaderResources(0, 2, nullSRV);
-        ID3D11RenderTargetView* rtv = dst;
-        ctx->OMSetRenderTargets(1, &rtv, nullptr);
+        m_finished = true;
+        return false;
+    }
+    const size_t index = (std::min)(m_frames.size() - 1, static_cast<size_t>((std::max)(0.0f, elapsedSeconds) * m_fps + 0.5f));
+    const Frame& frame = m_frames[index];
 
-        D3D11_MAPPED_SUBRESOURCE map;
-        if (SUCCEEDED(ctx->Map(m_cbPost.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map)))
+    // Whatever the app had bound, to put back afterwards.
+    ComPtr<ID3D11RenderTargetView> appTarget;
+    ComPtr<ID3D11DepthStencilView> appDepth;
+    D3D11_VIEWPORT appViewport = {};
+    UINT viewports = 1;
+    ctx->OMGetRenderTargets(1, appTarget.GetAddressOf(), appDepth.GetAddressOf());
+    ctx->RSGetViewports(&viewports, &appViewport);
+    ID3D11ShaderResourceView* none[8] = {};
+    ctx->PSSetShaderResources(0, 8, none);
+
+    m_placed.clear();
+    m_target = -1;
+    const uint32_t drawWords = kStates + m_stateCount + 16;
+    for (uint32_t i = 0; i < frame.count; )
+    {
+        const uint32_t* w = frame.words + i;
+        const uint32_t left = frame.count - i;
+        if (w[0] == kCmdTarget && left >= 2)
         {
-            PostCB* c = (PostCB*)map.pData;
-            c->texel[0] = 1.0f / srcW; c->texel[1] = 1.0f / srcH;
-            c->texel[2] = c->texel[3] = 0.0f;
-            c->post[0] = dir; c->post[1] = 1.0f; c->post[2] = c->post[3] = 0.0f;
-            ctx->Unmap(m_cbPost.Get(), 0);
+            m_target = (w[1] < m_surfaces.size() && m_surfaces[w[1]].rtv) ? static_cast<int>(w[1]) : -1;
+            Bind(ctx);
+            i += 2;
         }
-        ctx->PSSetShaderResources(0, 1, &src);
-        ctx->Draw(3, 0);
-    };
-
-    // Downsample straight into the first glow target by blurring horizontally
-    // from the full-resolution scene, then ping-pong for the vertical pass and
-    // one more round to widen it. The console does four such passes per glow
-    // level; two per axis lands in the same place visually at a quarter of
-    // the cost.
-    pass(m_sceneSRV.Get(),  m_glowRTV[0].Get(), (float)m_width, (float)m_height, 0.0f);
-    pass(m_glowSRV[0].Get(), m_glowRTV[1].Get(), (float)m_glowW, (float)m_glowH, 1.0f);
-    pass(m_glowSRV[1].Get(), m_glowRTV[0].Get(), (float)m_glowW, (float)m_glowH, 0.0f);
-    pass(m_glowSRV[0].Get(), m_glowRTV[1].Get(), (float)m_glowW, (float)m_glowH, 1.0f);
-
-    ctx->PSSetShaderResources(0, 2, nullSRV);
-}
-
-void BootAnimation::Composite(ID3D11DeviceContext* ctx)
-{
-    // The glow goes back onto the scene target, which is also what gets handed
-    // out as the frame SRV -- so the composite has to unbind it as a source
-    // before binding it as a target, or the runtime drops the write.
-    ID3D11ShaderResourceView* nullSRV[2] = { nullptr, nullptr };
-    ctx->PSSetShaderResources(0, 2, nullSRV);
-
-    ID3D11RenderTargetView* rtv = m_sceneRTV.Get();
-    ctx->OMSetRenderTargets(1, &rtv, nullptr);
-
-    D3D11_VIEWPORT vp = {};
-    vp.Width = (float)m_width; vp.Height = (float)m_height; vp.MaxDepth = 1.0f;
-    ctx->RSSetViewports(1, &vp);
-
-    ctx->VSSetShader(m_vsQuad.Get(), nullptr, 0);
-    ctx->PSSetShader(m_psComposite.Get(), nullptr, 0);
-    ctx->OMSetBlendState(m_bsAdd.Get(), nullptr, 0xFFFFFFFF);
-    ctx->OMSetDepthStencilState(m_dsNone.Get(), 0);
-    ctx->IASetInputLayout(nullptr);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    D3D11_MAPPED_SUBRESOURCE map;
-    if (SUCCEEDED(ctx->Map(m_cbPost.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map)))
-    {
-        PostCB* c = (PostCB*)map.pData;
-        c->texel[0] = 1.0f / (float)m_width; c->texel[1] = 1.0f / (float)m_height;
-        c->texel[2] = c->texel[3] = 0.0f;
-        c->post[0] = 0.0f;
-        c->post[1] = 0.85f;                       // glow gain
-        c->post[2] = c->post[3] = 0.0f;
-        ctx->Unmap(m_cbPost.Get(), 0);
+        else if (w[0] == kCmdClear && left >= 3)
+        {
+            // Flags: the four colour channels, then depth, then stencil. The colour is ARGB.
+            if (m_target >= 0)
+            {
+                const Surface& s = m_surfaces[m_target];
+                if (w[1] & 0xF)
+                {
+                    const float c[4] = { ((w[2] >> 16) & 0xFF) / 255.0f, ((w[2] >> 8) & 0xFF) / 255.0f, (w[2] & 0xFF) / 255.0f,
+                                         ((w[2] >> 24) & 0xFF) / 255.0f };
+                    ctx->ClearRenderTargetView(s.rtv.Get(), c);
+                }
+                if (w[1] & 0x30)
+                {
+                    ctx->ClearDepthStencilView(s.dsv.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+                }
+            }
+            i += 3;
+        }
+        else if (w[0] == kCmdResolve && left >= 2)
+        {
+            // What the surface holds becomes the texture -- its samples
+            // averaged, if it has them -- which may be bound somewhere: unbind first.
+            if (m_target >= 0 && w[1] < m_textures.size())
+            {
+                const Surface& s = m_surfaces[m_target];
+                const Texture& t = m_textures[w[1]];
+                if (t.w == s.w && t.h == s.h && t.rtv)
+                {
+                    ctx->PSSetShaderResources(0, 8, none);
+                    if (s.samples > 1)
+                    {
+                        ctx->ResolveSubresource(t.texture.Get(), 0, s.color.Get(), 0, DXGI_FORMAT_R8G8B8A8_UNORM);
+                    }
+                    else
+                    {
+                        ctx->CopyResource(t.texture.Get(), s.color.Get());
+                    }
+                    if (AlphaIsOne(t.format))
+                    {
+                        MakeOpaque(ctx, t);
+                        Bind(ctx);
+                    }
+                }
+            }
+            i += 2;
+        }
+        else if (w[0] == kCmdPresent && left >= 2)
+        {
+            if (w[1] < m_textures.size())
+            {
+                m_frameSRV = m_textures[w[1]].srv;      // one of the title's two front buffers, in turn
+            }
+            i += 2;
+        }
+        else if ((w[0] == kCmdVsConst || w[0] == kCmdPsConst) && left >= 3 && left >= 3 + static_cast<uint64_t>(w[2]) * 4)
+        {
+            std::vector<float>& dst = (w[0] == kCmdVsConst) ? m_vsConst : m_psConst;
+            if (static_cast<uint64_t>(w[1]) + w[2] <= dst.size() / 4)
+            {
+                std::memcpy(dst.data() + w[1] * 4, w + 3, static_cast<size_t>(w[2]) * 16);
+            }
+            i += 3 + w[2] * 4;
+        }
+        else if (w[0] == kCmdDraw && left >= drawWords)
+        {
+            Draw(ctx, w);
+            i += drawWords;
+        }
+        else
+        {
+            break;      // not a recording this build reads
+        }
     }
 
-    // Only the blurred glow is read; it goes on t1 to match gGlow.
-    ID3D11ShaderResourceView* glow = m_glowSRV[1].Get();
-    ctx->PSSetShaderResources(1, 1, &glow);
-    ID3D11Buffer* cb = m_cbPost.Get();
-    ctx->PSSetConstantBuffers(1, 1, &cb);
-    ID3D11SamplerState* samp = m_sampler.Get();
-    ctx->PSSetSamplers(0, 1, &samp);
-
-    ctx->Draw(3, 0);
-
-    ctx->PSSetShaderResources(0, 2, nullSRV);
-    ctx->OMSetRenderTargets(0, nullptr, nullptr);
-    ctx->OMSetBlendState(m_bsOpaque.Get(), nullptr, 0xFFFFFFFF);
+    ctx->PSSetShaderResources(0, 8, none);
+    ctx->OMSetRenderTargets(1, appTarget.GetAddressOf(), appDepth.Get());
+    if (viewports)
+    {
+        ctx->RSSetViewports(1, &appViewport);
+    }
+    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    ctx->OMSetDepthStencilState(nullptr, 0);
+    ctx->RSSetState(nullptr);
+    return true;
 }
