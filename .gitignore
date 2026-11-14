@@ -1,0 +1,32 @@
+# Source only. Everything extracted from a console -- the dumps, the unpacked
+# packs, the fonts, the cooked assets -- and everything built stays out:
+# ignore the lot, then let the code back in.
+/*
+!/.gitignore
+!/README.md
+!/CMakeLists.txt
+!/build.bat
+!/release.bat
+!/src/
+!/third_party/
+!/tools/
+!/XURs/
+!/XZP/
+!/DASH/
+!/FONTS/
+
+# Of the folders that hold extracted files beside their scripts, only the scripts.
+/XURs/*
+!/XURs/*.py
+!/XURs/*.sh
+!/XURs/*.md
+/XZP/*
+!/XZP/*.py
+/DASH/*
+!/DASH/*.py
+/FONTS/*
+!/FONTS/*.py
+/tools/**/*.json
+/tools/**/*.png
+
+__pycache__/
