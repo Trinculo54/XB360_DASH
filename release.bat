@@ -42,22 +42,29 @@ echo === building
 cmake --build build-release --config Release
 if errorlevel 1 exit /b 1
 
-rem The Visual Studio generator is multi-config, so the exe lands in a
-rem per-config subfolder whose name depends on how CMakeLists sets its output
-rem directory -- find it rather than assuming a path.
-set "EXE="
-for /r "build-release" %%F in (DashX360Native.exe) do set "EXE=%%F"
-if not defined EXE (
-    echo [!] built, but DashX360Native.exe wasn't found under build-release\
+rem The Visual Studio generator is multi-config and CMakeLists sets no output
+rem directory, so the exe lands in the per-config subfolder. (Searching for it
+rem with "for /r" and a plain file name does not work: that form names the
+rem file in every subfolder whether or not it is there.)
+set "EXE=build-release\Release\DashX360Native.exe"
+if not exist "%EXE%" (
+    echo [!] built, but %EXE% is not there
     exit /b 1
 )
 
 echo === staging dist\
 if exist dist rmdir /s /q dist
 mkdir dist
-copy /y "!EXE!" "dist\" >nul
-xcopy /e /i /y /q assets "dist\assets" >nul
+copy /y "%EXE%" "dist\" >nul
 if errorlevel 1 (
+    echo [!] couldn't copy %EXE% into dist\
+    exit /b 1
+)
+rem Left out: scenes\_to_delete, and video\ -- the boot video the app no
+rem longer plays now that assets\bootanim is rendered instead. robocopy
+rem reports success as any exit code below 8.
+robocopy assets "dist\assets" /e /xd _to_delete video /nfl /ndl /njh /njs /np >nul
+if errorlevel 8 (
     echo [!] couldn't copy assets\ -- the app resolves assets\scenes and
     echo     assets\fonts relative to the exe, so it needs to sit alongside.
     exit /b 1
